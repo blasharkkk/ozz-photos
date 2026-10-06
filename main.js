@@ -1807,11 +1807,13 @@ backStage.addEventListener('pointerenter', () => updateCursor());
 // —— 画笔 ——
 function applyBackBrush() {
   bic.lineCap = 'round'; bic.lineJoin = 'round';
-  bic.strokeStyle = edit.color; bic.fillStyle = edit.color; bic.globalAlpha = 1;
+  bic.strokeStyle = edit.color; bic.fillStyle = edit.color;
+  // 笔触一律不透明：半透明笔迹重叠会累积 alpha，浅色笔画叠加成"擦不掉的银灰残影"
+  bic.globalAlpha = 1;
   bic.globalCompositeOperation = edit.tool === 'eraser' ? 'destination-out' : 'source-over';
-  if (edit.tool === 'pencil') { bic.lineWidth = Math.max(1, edit.size * .32); bic.globalAlpha = .9; }
+  if (edit.tool === 'pencil') { bic.lineWidth = Math.max(1, edit.size * .32); }
   else if (edit.tool === 'ball') { bic.lineWidth = Math.max(1, edit.size * .28); }
-  else if (edit.tool === 'marker') { bic.lineWidth = edit.size * 1.6; bic.globalAlpha = .92; } // 油性：不透明、覆盖
+  else if (edit.tool === 'marker') { bic.lineWidth = edit.size * 1.6; } // 油性笔：实色覆盖
   else if (edit.tool === 'eraser') { bic.lineWidth = Math.max(5, edit.size * 1.5); }
 }
 function drawSeg(a, b) { bic.beginPath(); bic.moveTo(a.x, a.y); bic.lineTo(b.x, b.y); bic.stroke(); }
