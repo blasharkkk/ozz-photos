@@ -1,0 +1,14 @@
+# 临时验证脚本与截图（每轮调试用，不入库）
+_*.mjs
+_*.png
+_*.jpg
+_check.mjs
+_c.mjs
+dims.json
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Node（若以后引入构建）
+node_modules/

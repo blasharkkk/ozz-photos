@@ -1,0 +1,161 @@
+@font-face { font-family: 'Caveat'; src: url('assets/fonts/caveat.woff2') format('woff2'); font-display: swap; }
+@font-face { font-family: 'Ma Shan Zheng'; src: url('assets/fonts/mashanzheng.woff2') format('woff2'); font-display: swap; }
+@font-face { font-family: 'Zhi Mang Xing'; src: url('assets/fonts/zhimangxing.woff2') format('woff2'); font-display: swap; }
+:root { color-scheme: dark; --ink: #f2ede4; --dim: #f2ede499; --line: #f2ede424; font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2927; color: var(--ink); -webkit-font-smoothing: antialiased; }
+#scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; cursor: grab; }
+#scene.is-pointer { cursor: pointer; }
+#scene:active { cursor: grabbing; }
+
+/* 顶部工具栏 */
+.toolbar { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; z-index: 5; padding: 6px 8px; border: 1px solid var(--line); border-radius: 999px; background: #161513e8; box-shadow: 0 10px 30px #0005; backdrop-filter: blur(6px); }
+.toolbar button { flex: none; height: 32px; padding: 0 14px; border: 0; border-radius: 999px; background: #ffffff14; color: var(--ink); font: inherit; cursor: pointer; transition: background .15s; }
+.toolbar button:hover { background: #ffffff26; }
+.toolbar .hint { padding: 0 6px; color: var(--dim); white-space: nowrap; }
+@media (max-width: 560px) { .toolbar .hint { display: none; } }
+
+/* 选中照片的说明栏。实底背景，避免在移动场景里重算模糊。 */
+.caption { position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; align-items: center; gap: 4px; width: max-content; max-width: calc(100% - 24px); padding: 5px; border: 1px solid var(--line); border-radius: 999px; background: #161513e8; box-shadow: 0 10px 30px #0005; z-index: 5; }
+.caption[hidden] { display: none; }
+.caption p { display: flex; align-items: baseline; gap: 10px; min-width: 0; margin: 0 8px; white-space: nowrap; color: var(--dim); }
+.caption strong { overflow: hidden; text-overflow: ellipsis; color: var(--ink); font-weight: 500; }
+.caption a { color: inherit; text-underline-offset: 3px; }
+.caption button { flex: none; width: 32px; height: 32px; border: 0; border-radius: 50%; background: none; color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer; }
+.caption button:hover { background: #ffffff1a; }
+.caption #replace { width: auto; padding: 0 12px; font-size: 13px; border-radius: 999px; background: #ffffff14; }
+.caption #replace:hover { background: #ffffff26; }
+@media (max-width: 520px) { .caption #credit { display: none; } }
+
+/* 轻提示：保存异常等重要信息才出现，不打扰 */
+#toast { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 40; max-width: min(460px, calc(100% - 32px)); padding: 10px 16px; border: 1px solid #ffffff26; border-radius: 10px; background: #2a2320f2; box-shadow: 0 12px 34px #000a; color: #f2ede4; font: 13px/1.5 var(--font-sans, system-ui, sans-serif); }
+#toast[hidden] { display: none; }
+
+/* 照片编辑器：裁剪 + 白色相框 */
+.editor { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 16px; background: #000b; backdrop-filter: blur(4px); }
+.editor[hidden] { display: none; }
+.ed-panel { display: flex; flex-direction: column; gap: 12px; width: min(880px, 100%); max-height: 100%; overflow: auto; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: #161513f5; box-shadow: 0 24px 70px #000c; }
+/* 背面模式：整屏不滚动，画布吃掉全部剩余空间；面板尽量铺满窗口（两侧留白是浪费） */
+.ed-panel.ed-full { width: 100%; max-width: none; height: 100%; overflow: hidden; }
+.ed-panel.ed-full .ed-body { flex: 1; min-width: 0; min-height: 0; flex-wrap: nowrap; }
+.ed-panel.ed-full .ed-backwrap { min-width: 0; }
+.ed-head { font-weight: 600; }
+.ed-head span { margin-left: 10px; color: var(--dim); font-size: 12px; font-weight: 400; }
+.ed-body { display: flex; flex-wrap: wrap; gap: 14px; }
+.ed-left { flex: 1 1 380px; min-width: 300px; }
+.ed-right { flex: 0 1 264px; display: flex; flex-direction: column; gap: 10px; }
+/* 背面模式：右侧工具栏固定宽、不整体滚动；只有文本属性区内部可滚动，抓手等工具永不被挤出 */
+.ed-panel.ed-full .ed-backtools { flex: 0 0 214px; max-width: 214px; min-height: 0; overflow: hidden; }
+.ed-panel.ed-full .ed-backtools > * { flex: none; }
+.ed-panel.ed-full #edBackTools, .ed-panel.ed-full #edSwatches, .ed-panel.ed-full #edSizeRow { flex: none; }
+.ed-stage { position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; min-height: 220px; max-height: 56vh; border: 1px dashed var(--line); border-radius: 8px; background: #0d0c0b; touch-action: none; }
+#edImg { display: block; max-width: 100%; max-height: 56vh; user-select: none; -webkit-user-drag: none; }
+.ed-crop { position: absolute; box-shadow: 0 0 0 9999px #000a; outline: 1px solid #ffffffcc; cursor: move; }
+.ed-crop span { position: absolute; width: 13px; height: 13px; background: #fff; border: 1px solid #0007; border-radius: 2px; }
+.ed-crop [data-h="nw"] { left: -7px; top: -7px; cursor: nwse-resize; }
+.ed-crop [data-h="ne"] { right: -7px; top: -7px; cursor: nesw-resize; }
+.ed-crop [data-h="sw"] { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.ed-crop [data-h="se"] { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.ed-crop [data-h="n"] { left: calc(50% - 6px); top: -7px; cursor: ns-resize; }
+.ed-crop [data-h="s"] { left: calc(50% - 6px); bottom: -7px; cursor: ns-resize; }
+.ed-crop [data-h="w"] { left: -7px; top: calc(50% - 6px); cursor: ew-resize; }
+.ed-crop [data-h="e"] { right: -7px; top: calc(50% - 6px); cursor: ew-resize; }
+.ed-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.ed-row[hidden] { display: none; }
+.ed-slider[hidden] { display: none; }
+#edFrames { margin-top: 0; }
+.ed-row button { height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; transition: background .15s; }
+.ed-row button:hover { background: #ffffff14; }
+.ed-row button.on { border-color: #f2ede499; background: #f2ede426; }
+.ed-prevwrap { display: flex; align-items: center; justify-content: center; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0d0c0b; }
+#edPrev { max-width: 100%; max-height: 34vh; background: #f4f1ea; box-shadow: 0 4px 16px #0007; }
+.ed-slider { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+.ed-slider input { flex: 1; accent-color: #e8e3d8; }
+.ed-label { margin-top: 2px; color: var(--dim); font-size: 12px; letter-spacing: .08em; }
+.ed-papers { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.paper-chip { width: 40px; height: 48px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: #0d0c0b; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: border-color .15s, transform .12s; }
+.paper-chip canvas { display: block; border-radius: 4px; }
+.paper-chip:hover { transform: translateY(-1px); border-color: #f2ede466; }
+.paper-chip.on { border-color: #f2ede4; box-shadow: 0 0 0 1px #f2ede4aa; }
+.paper-chip.solid { width: 30px; height: 30px; border-radius: 999px; }
+.paper-chip.solid.on { box-shadow: 0 0 0 2px #f2ede4cc; }
+.ed-papers.solidgrid { display: grid; grid-template-columns: repeat(6, 30px); gap: 6px; }
+.ed-papers.doodlegrid { display: grid; grid-template-columns: repeat(6, 36px); gap: 5px; }
+.ed-papers.doodlegrid .paper-chip { width: 36px; height: 44px; }
+.ed-sliders { display: flex; flex-direction: column; gap: 8px; }
+.ed-sliders[hidden] { display: none; }
+.ed-sliders .ed-slider input { -webkit-appearance: none; appearance: none; height: 14px; border-radius: 999px; border: 1px solid var(--line); padding: 0; }
+.ed-sliders .ed-slider input::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 20px; border-radius: 4px; background: #fff; border: 1px solid #0006; box-shadow: 0 1px 4px #0008; margin-top: -3px; }
+#edHue::-webkit-slider-runnable-track { height: 14px; border-radius: 999px; background: linear-gradient(to right, #e60012, #fdb913, #ffe94e, #6abf4b, #56b9e9, #27447b, #7d5fc4, #d062c4); }
+#edSat { --satgrad: linear-gradient(to right, #c9c9c9, #e60012); }
+#edSat::-webkit-slider-runnable-track { height: 14px; border-radius: 999px; background: var(--satgrad); }
+.ed-foot { display: flex; justify-content: flex-end; gap: 8px; }
+.ed-foot button { height: 34px; padding: 0 18px; border: 0; border-radius: 999px; background: #ffffff14; color: var(--ink); font: inherit; cursor: pointer; transition: background .15s; }
+.ed-foot button:hover { background: #ffffff26; }
+.ed-foot #edOk { background: #e8e3d8; color: #22211f; font-weight: 600; }
+.ed-foot #edOk:hover { background: #fff; }
+
+/* 正面/背面模式切换 */
+.ed-mode { margin-top: 2px; }
+.ed-mode button { height: 30px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: #ffffff10; color: var(--ink); font: inherit; cursor: pointer; }
+.ed-mode button.on { background: #e8e3d8; color: #22211f; border-color: transparent; font-weight: 600; }
+
+/* 背面画布：纸面 + 墨层 + 文本层三层叠加，整体可缩放平移 */
+.ed-left[hidden], .ed-right[hidden] { display: none; }
+.ed-backwrap { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+/* 注意：必须覆盖 .ed-stage 的 flex 居中与 min-height，否则画布会被居中 + transform 二次偏移 */
+.ed-backstage { position: relative; display: block; flex: 1; min-height: 0; max-height: none; border-style: solid; background: #0d0c0b; }
+/* 画笔光标：跟随颜色与粗细的实心圆（隐藏系统光标）；panning 时换 grab */
+.ed-backstage, .ed-backstage #edBackInk { cursor: none; }
+.ed-backstage.panning, .ed-backstage.panning #edBackInk { cursor: grabbing; }
+/* 画笔光标元素 */
+#edBrushCursor { position: absolute; left: 0; top: 0; border-radius: 50%; pointer-events: none; z-index: 3; transform: translate(-50%, -50%); box-shadow: 0 0 0 1px #0006, inset 0 0 0 1px #ffffff4d; }
+#edBrushCursor[hidden] { display: none; }
+.ed-backworld { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.ed-backworld canvas { position: absolute; left: 0; top: 0; display: block; }
+#edBackPaper { border-radius: 2px; box-shadow: 0 8px 30px #000a; }
+#edBackInk, #edBackText { cursor: crosshair; }
+.ed-backstage.panning, .ed-backstage.panning * { cursor: grab; }
+.ed-backstage.panning { cursor: grabbing; }
+/* 文本框选中态：框 + 右下角等比缩放手柄 */
+#edBackText { pointer-events: none; }
+.ed-textpanel { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); min-height: 0; overflow-y: auto; }
+.ed-textpanel[hidden] { display: none; }
+.ed-panel.ed-full .ed-textpanel { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+.ed-toolgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.ed-toolgrid button { height: 30px; border: 1px solid var(--line); border-radius: 8px; background: #ffffff10; color: var(--ink); font: inherit; cursor: pointer; }
+.ed-toolgrid button.on { background: #e8e3d8; color: #22211f; border-color: transparent; font-weight: 600; }
+.ed-danger { color: #e08a80 !important; }
+.ed-tip { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
+.ed-zoombar { display: flex; align-items: center; gap: 6px; flex: none; }
+.ed-zoombar button { height: 26px; min-width: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: #ffffff10; color: var(--ink); font: inherit; cursor: pointer; }
+.ed-zoombar button:hover { background: #ffffff20; }
+#edZoomVal { min-width: 46px; text-align: center; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ed-zoomhint { margin-left: auto; color: #f2ede466; font-size: 11px; }
+/* 「？怎么平移」按钮与引导条：说明浏览器鼠标手势可能占用右键 */
+.ed-helpbtn { height: 26px; min-width: 0 !important; padding: 0 10px !important; border-radius: 999px !important; color: #f2ede4aa !important; font-size: 12px; }
+.ed-helpbtn:hover { color: var(--ink) !important; }
+.ed-pantip { display: flex; flex-direction: column; gap: 4px; margin: 0 8px 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #1d1b18; color: #d8d2c6; font-size: 12px; line-height: 1.6; }
+.ed-pantip[hidden] { display: none; }
+.ed-pantip b { color: var(--ink); font-size: 13px; }
+.ed-pantip kbd { padding: 1px 5px; border: 1px solid #ffffff2e; border-radius: 4px; background: #ffffff14; color: #fff; font: inherit; font-size: 11px; }
+.ed-pantip button { align-self: flex-start; margin-top: 4px; height: 26px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: #ffffff14; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+.ed-pantip button:hover { background: #ffffff26; }
+#edSwatches { flex-wrap: wrap; }
+#edSwatches button { width: 24px; height: 24px; border-radius: 999px; border: 2px solid #0005; cursor: pointer; padding: 0; }
+#edSwatches button.on { outline: 2px solid #e8e3d8; outline-offset: 1px; }
+#edSwatches .ed-custom { position: relative; background: conic-gradient(red, #ff0, #0f0, #0ff, #00f, #f0f, red); }
+/* 下拉：深色底必须显式给 option / optgroup 上色，否则系统渲染成浅灰字看不清 */
+.ed-select { width: 100%; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: #ffffff10; color: var(--ink); font: inherit; padding: 0 8px; color-scheme: dark; }
+.ed-select option { background: #24211d; color: #f4f1ea; }
+.ed-select optgroup { background: #1b1916; color: #b9b2a6; font-style: normal; }
+.ed-select optgroup option { background: #24211d; color: #f4f1ea; }
+#edBackRight #edUndo, #edBackRight #edClear { flex: 1; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: #ffffff10; color: var(--ink); font: inherit; cursor: pointer; }
+#edBackRight #edUndo:disabled { opacity: .4; cursor: default; }
+#edBold, #edItalic { width: 40px; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: #ffffff10; color: var(--ink); font: inherit; cursor: pointer; }
+#edBold.on, #edItalic.on { background: #e8e3d8; color: #22211f; }
+#edBold { font-weight: 800; }
+/* 背面文字编辑浮层 */
+#edTextPop { position: fixed; z-index: 30; display: flex; gap: 6px; align-items: center; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: #161513f5; box-shadow: 0 12px 30px #000a; }
+#edTextPop[hidden] { display: none; }
+#edTextPop input[type=text] { width: 150px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #0d0c0b; color: var(--ink); font: inherit; padding: 0 8px; }
+#edTextPop button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: #e8e3d8; color: #22211f; font: inherit; cursor: pointer; }
