@@ -1,4 +1,4 @@
-// Paper Cloud：照片印在棉纸上，悬成一片云，浮在破碎镜面之上；镜面把流动的光投到天花板。
+// Ozz photos：照片印在棉纸上，悬成一片云，浮在破碎镜面之上；镜面把流动的光投到天花板。
 // 原生 WebGL2。房间、每一张纸片（一次实例化绘制）、吊线，外加半分辨率的镜面反射 pass。
 // 在原作者实现基础上本地化，并加了“运行时上传/替换/添加照片、自动适配”的能力。
 const LAYER = 256;            // 每张照片的纹理尺寸；选中时会加载原图
@@ -192,12 +192,17 @@ const buffer = (data) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_B
 const attrib = (loc, n, stride, offset, divisor) => { gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, n, gl.FLOAT, false, stride, offset); gl.vertexAttribDivisor(loc, divisor); };
 
 // ---------------------------------------------------------------------------
-// 照片与“云”
+// 照片与"云"
 // ---------------------------------------------------------------------------
-const basePhotos = (await (await fetch('photos.json')).json()).photos;
+// 只读模式：导出的单文件 HTML 会把作品数据内嵌在 window.__PC_DATA__ 里，
+// 此时既不读 photos.json、也不连本地存储，更不提供任何写入入口（只能浏览）。
+const EMBEDDED = window.__PC_DATA__ || null;
+const READONLY = !!(EMBEDDED && EMBEDDED.readonly);
+if (READONLY) document.documentElement.dataset.readonly = '1';
+const basePhotos = EMBEDDED ? EMBEDDED.photos : (await (await fetch('photos.json')).json()).photos;
 // 应用本地存储里你自己上传/替换的照片（IndexedDB 优先，localStorage 兜底）
 const STORE_KEY = 'papercloud.v1';
-const saved = await storeGet(STORE_KEY).catch((e) => { console.warn('读取已存作品失败', e); return null; });
+const saved = READONLY ? null : await storeGet(STORE_KEY).catch((e) => { console.warn('读取已存作品失败', e); return null; });
 const photos = basePhotos.map((p) => ({ ...p }));
 if (saved) {
   for (const p of photos) if (saved.replaced?.[p.id]) { const r = saved.replaced[p.id]; p.src = r.src; p.width = r.width; p.height = r.height; p.aspect = r.width / r.height; p.fitted = r.fitted !== false; p.back = r.back || null; p.raw = r.raw || null; p.cfg = r.cfg || null; p.texts = r.texts || null; }
@@ -506,11 +511,23 @@ function frame(now) {
       const d = dyn[i]; if (!d) continue;
       const dragging = sheetDrag && sheetDrag.i === i;
       // 拖拽时跟手但保留一点松弛感；松手后弹簧更软、阻尼更小 → 像被拨动的线帘轻轻荡、慢慢归于平静
-      const ks = dragging ? 55 : 12, cd = dragging ? 7 : 1.8;
+      const ks = dragging ? 55 : 9, cd = dragging ? 7 : 0.62;
       const tx = dragging ? sheetDrag.tx : 0, ty = dragging ? sheetDrag.ty : 0, tz = dragging ? sheetDrag.tz : 0;
-      d.vx += (-ks * (d.ox - tx) - cd * d.vx) * dt; d.vy += (-ks * (d.oy - ty) - cd * d.vy) * dt; d.vz += (-ks * (d.oz - tz) - cd * d.vz) * dt;
-      d.vx = Math.max(-2.5, Math.min(2.5, d.vx)); d.vy = Math.max(-2.5, Math.min(2.5, d.vy)); d.vz = Math.max(-2.5, Math.min(2.5, d.vz));
-      d.ox += d.vx * dt; d.oy += d.vy * dt; d.oz += d.vz * dt;
+      // 弹簧回位：标准半隐式欧拉的欠阻尼弹簧。
+      // 不再做任何「快到终点就强行按住」的修正 —— 旧版那段收尾微调会在最后一小段
+      // 额外猛拉一把，视觉上就是"力还没释放完就被按停"，很假；现在让物理自己收尾、
+      // 自然回荡、慢慢归于平静。只有真正静止（位置与速度都极小）才干净归零，
+      // 避免肉眼可见的"跳到终点"。手机端与主场景共用同一条路径，故两端一起修好。
+      const spring = (o, v, t) => {
+        v += (-ks * (o - t) - cd * v) * dt;                 // 速度：弹性 + 惯性
+        v = Math.max(-4, Math.min(4, v));                   // 仅数值保护，幅度远超出手感范围，不会限制正常摆动
+        const no = o + v * dt;                               // 位置按速度推进
+        if (Math.abs(t - no) < 3e-3 && Math.abs(v) < 3e-2) return [t, 0]; // 真正静止才归零
+        return [no, v];
+      };
+      [d.ox, d.vx] = spring(d.ox, d.vx, tx);
+      [d.oy, d.vy] = spring(d.oy, d.vy, ty);
+      [d.oz, d.vz] = spring(d.oz, d.vz, tz);
       d.vyaw += (-10 * d.ry - 2.0 * d.vyaw) * dt; d.ry += d.vyaw * dt;
       const act = Math.abs(d.ox) + Math.abs(d.oy) + Math.abs(d.oz) + Math.abs(d.ry) + Math.abs(d.vx) + Math.abs(d.vy) + Math.abs(d.vz) + Math.abs(d.vyaw) > 3e-4;
       if (!act) { d.ox = d.oy = d.oz = d.ry = d.vx = d.vy = d.vz = d.vyaw = 0; }
@@ -615,12 +632,15 @@ function applyBrush(i, dxm, dym, scale) {
 }
 
 const caption = $('caption');
+// 底部提示条与说明栏会重叠，用 body 类让 CSS 知道该不该让位（集中一处，别散落各处切 class）
+function syncCaption() { document.body.classList.toggle('has-caption', !caption.hidden); }
 function select(i) {
   sel = i;
   idleSince = performance.now();
   if (i < 0) {
     Object.assign(goal, { ...HOME, yaw: goal.yaw });
     caption.hidden = true;
+    syncCaption();
     canvas.focus({ preventScroll: true });
   } else {
     const s = sheets[i], p = photos[s.photo], t = Math.tan(FOV / 2);
@@ -630,10 +650,12 @@ function select(i) {
     Object.assign(goal, { x: s.x, y: s.y, z: s.z, yaw: cam.yaw + turn, pitch: .04, dist: Math.max(s.h / (1.1 * t), s.w / (1.2 * t * W / H)) });
     $('title').textContent = p.description;
     $('credit').textContent = p.photographer;
+    $('flipBtn').hidden = !p.back;   // 无背面的照片不显示（触摸设备才可见）
     if (p.back) loadBackFull(i);
     const src = $('source');
     if (p.source_page) { src.href = p.source_page; src.style.display = ''; } else src.style.display = 'none';
     caption.hidden = false;
+    syncCaption();
     fetch(p.full).then((r) => r.blob()).then((b) => createImageBitmap(b)).then((img) => {
       if (sel !== i) return;
       gl.activeTexture(gl.TEXTURE1);
@@ -668,12 +690,24 @@ const pointers = new Map();
 let moved = 0, spread = 0;
 const pinch = () => { const [a, b] = [...pointers.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
 const touched = () => { idleSince = performance.now(); wake(); };
+// 触摸长按进编辑（兜底手势）
+let holdTimer = 0, holdFired = false;
+// 触摸双击判定：记录上一次轻点的位置与时间
+let lastTap = null;
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   moved = 0;
   if (pointers.size === 2) { spread = pinch(); sheetDrag = null; } // 双指捏合时取消拖照片
-  else if (ready) { const i = pick(e.clientX, e.clientY); if (i >= 0) sheetDrag = { i, tx: 0, ty: 0, tz: 0 }; } // 按住照片：进入拖拽
+  // 按住照片：进入拖拽。t/vx/vy/vz 用来在松手瞬间把手指速度抛给照片（惯性）
+  else if (ready) { const i = pick(e.clientX, e.clientY); if (i >= 0) sheetDrag = { i, tx: 0, ty: 0, tz: 0, t: performance.now(), vx: 0, vy: 0, vz: 0 }; }
+  // 触摸长按 550ms 进入编辑（双击之外的另一种兜底手势；鼠标不触发）。
+  // 无论该照片是否已聚焦都生效——平板上用户很可能没先点一下就直接长按
+  if (e.pointerType !== 'mouse' && sheetDrag) {
+    clearTimeout(holdTimer);
+    const target = sheetDrag.i;
+    holdTimer = setTimeout(() => { if (moved < 8) { holdFired = true; lastTap = null; reeditPhoto(target); } }, 550);
+  }
   touched();
 });
 const lastMouse = { x: innerWidth / 2, y: innerHeight / 2 };
@@ -690,15 +724,26 @@ canvas.addEventListener('pointermove', (e) => {
   }
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
   p.x = e.clientX; p.y = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+  if (moved > 8) clearTimeout(holdTimer); // 一旦移动就不是长按了
   if (pointers.size === 1) {
     if (sheetDrag) {
-      // 拉动照片：指针位移换算成世界位移目标（限幅 .5m，手感柔和）
+      // 拉动照片：指针位移换算成世界位移目标（限幅 .95m，手感柔和）
       const wpp = 2 * cam.dist * Math.tan(FOV / 2) / innerHeight;
       let tx = sheetDrag.tx + (view.x[0] * dx - view.y[0] * dy) * wpp;
       let ty = sheetDrag.ty + (view.x[1] * dx - view.y[1] * dy) * wpp;
       let tz = sheetDrag.tz + (view.x[2] * dx - view.y[2] * dy) * wpp;
       const m = Math.hypot(tx, ty, tz);
       if (m > .95) { tx *= .95 / m; ty *= .95 / m; tz *= .95 / m; } // 可拉得更远、更松弛
+      // 记录最近一次的世界速度（做指数平滑，抹掉手抖与单帧抖动）。
+      // 松手时把它作为初速度交给照片 → 顺着甩出去的方向继续飞一段再荡回来。
+      // 没有这一步，无论弹簧参数多软，用户都会觉得"松手就被钉住"。
+      const now = performance.now();
+      const dtw = Math.max(0.008, Math.min(0.1, (now - sheetDrag.t) / 1000));
+      sheetDrag.t = now;
+      const ivx = (tx - sheetDrag.tx) / dtw, ivy = (ty - sheetDrag.ty) / dtw, ivz = (tz - sheetDrag.tz) / dtw;
+      sheetDrag.vx = sheetDrag.vx * 0.6 + ivx * 0.4;
+      sheetDrag.vy = sheetDrag.vy * 0.6 + ivy * 0.4;
+      sheetDrag.vz = sheetDrag.vz * 0.6 + ivz * 0.4;
       sheetDrag.tx = tx; sheetDrag.ty = ty; sheetDrag.tz = tz;
     } else {
       goal.yaw -= dx * .005;
@@ -711,22 +756,66 @@ canvas.addEventListener('pointermove', (e) => {
   }
   touched();
 });
+// 松手瞬间把手指的世界速度注入照片弹簧 —— 惯性的来源。
+// 只在"确实拖过"时生效；原地点击不注入（否则点一下照片会被弹走）。
+// 系数 0.55：全量抛出去会太野，0.55 保留"顺着甩的方向多飘一小段"的感觉。
+function flingSheet() {
+  if (!sheetDrag) return;
+  const d = dyn[sheetDrag.i];
+  if (d) {
+    d.vx += (sheetDrag.vx || 0) * 0.55;
+    d.vy += (sheetDrag.vy || 0) * 0.55;
+    d.vz += (sheetDrag.vz || 0) * 0.55;
+  }
+}
 const release = (e) => {
   pointers.delete(e.pointerId);
-  if (e.type === 'pointerup' && !pointers.size && ready) {
+  // 触摸抬起时可能还残留同源的 pointer 记录（部分浏览器触摸序列的 quirks），
+  // 导致 pointers.size 非 0 而跳过整块判定——这里只要抬起的就是「本次交互结束」
+  if (e.type === 'pointerup' && (pointers.size === 0 || e.pointerType !== 'mouse') && ready) {
+    clearTimeout(holdTimer);
+    if (holdFired) { holdFired = false; sheetDrag = null; lastTap = null; return; } // 长按已进编辑，跳过单击逻辑
+    if (moved >= 6) { // 拖动过：不算轻点。但必须清掉 sheetDrag，否则它会一直当"还在拖"，
+      flingSheet();     // 先把手势的速度交出去，再清状态
+      lastTap = null; sheetDrag = null; return;   // 目标不归零 → 照片被永久钉在偏移处（用户看到"拖完就不动了"）
+    }
+    // —— 触摸设备的双击：dblclick 在触屏上不可靠，用「两次轻点」判定 ——
+    // 阈值 900ms / 48px：真人双击间隔常在 200~600ms，但手指抬起与落下的反应慢，
+    // 阈值太小会漏判。距离阈值保证不会把"点两张不同照片"误判成双击。
+    if (e.pointerType !== 'mouse') {
+      const now = performance.now();
+      if (lastTap && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 48 && now - lastTap.t < 900) {
+        const prev = lastTap;
+        lastTap = null;
+        // 第二次轻点落在同一张纸上 → 进编辑；否则当作两次独立轻点分别处理
+        const j = pick(e.clientX, e.clientY);
+        const pi = prev.i;
+        if (j >= 0 && j === pi) { select(j); reeditPhoto(j); return; }
+        if (j >= 0) { if (sel === j) flipSheet(j); else select(j); }
+        else if (pi >= 0) { if (sel === pi) flipSheet(pi); else select(pi); }
+        return;
+      }
+      const ii = pick(e.clientX, e.clientY);
+      lastTap = ii >= 0 ? { x: e.clientX, y: e.clientY, t: now, i: ii } : null;
+      // 单击立刻响应（聚焦/翻转）——双击会在第二次轻点时补上编辑，不必等
+      if (ii >= 0) { if (sel === ii) flipSheet(ii); else select(ii); }
+      sheetDrag = null;
+      return;
+    }
     if (sheetDrag) {
       // 原地点击：已聚焦的那张→翻转看背面；否则照常飞入聚焦（单击翻转是原有手感，不改）
-      if (moved < 6) { if (sel === sheetDrag.i) flipSheet(sheetDrag.i); else select(sheetDrag.i); }
+      if (sel === sheetDrag.i) flipSheet(sheetDrag.i); else select(sheetDrag.i);
       sheetDrag = null; // 拉动后松手：目标归零，弹簧自然回弹
-    } else if (moved < 6) {
+    } else {
       const i = pick(e.clientX, e.clientY);
       if (i >= 0) { if (sel === i) flipSheet(i); else select(i); }
     }
-  }
+  } else if (e.type !== 'pointerup') lastTap = null;
 };
 // 重新编辑一张照片：直接打开编辑器，绝不弹文件选择框
 // —— 用户的意思是「在这张照片已有的创作基础上继续改」，而不是让他去文件夹里重新找一遍
 async function reeditPhoto(si) {
+  if (READONLY) { toast('这是只读分享版，不能编辑照片'); return; }
   const sh = sheets[si];
   if (!sh) return;
   await openEditorOn(sh.photo);
@@ -780,7 +869,10 @@ addEventListener('resize', resize);
 // ---------------------------------------------------------------------------
 const fileInput = $('file');
 let pending = null; // { mode: 'add' | 'replace', sheet?: number }
-function openPicker(mode, sheet) { pending = { mode, sheet }; fileInput.value = ''; fileInput.click(); }
+function openPicker(mode, sheet) {
+  if (READONLY) { toast('这是只读分享版，不能添加或替换照片'); return; }
+  pending = { mode, sheet }; fileInput.value = ''; fileInput.click();
+}
 fileInput.addEventListener('change', () => {
   const f = fileInput.files[0];
   if (!f) return;
@@ -793,7 +885,7 @@ fileInput.addEventListener('change', () => {
 // ---------------------------------------------------------------------------
 const editor = $('editor'), edImg = $('edImg'), edStage = $('edStage'), edCrop = $('edCrop');
 const edPrev = $('edPrev'), pctx = edPrev.getContext('2d');
-const edit = { ratio: 0, crop: null, frame: 'polaroid', fw: .07, series: 'classic', paperId: 'warm', custom: '#f4f1ea', lastPaper: { classic: 'warm' }, tpl: 'wide', pending: null, pendingBack: null, pendingTexts: null, restore: null, origURL: null, drag: null, mode: 'front', backURL: null, tool: 'pencil', color: '#35302a', size: 4, bold: false, italic: false, font: "'Ma Shan Zheng', cursive", _backInit: false };
+const edit = { ratio: 0, crop: null, frame: 'polaroid', fw: .07, series: 'classic', paperId: 'warm', custom: '#f4f1ea', lastPaper: { classic: 'warm' }, tpl: 'wide', pending: null, pendingBack: null, pendingTexts: null, restore: null, origURL: null, drag: null, mode: 'front', backURL: null, tool: 'pencil', color: '#35302a', size: 4, bold: false, italic: false, font: "'XiaXingKai', cursive", _backInit: false };
 const MINC = 24;               // 最小裁剪尺寸（图像像素）
 
 // ---------------------------------------------------------------------------
@@ -1620,9 +1712,18 @@ let backDrawing = false, backLast = null, backPanning = false, backPanFrom = nul
 let backDrag = null;       // 文本拖动/缩放：{kind:'move'|'scale', ...}
 let textEditIdx = -1, textEditPop = null;
 const bview = { z: 1, x: 0, y: 0 };   // 画布缩放与平移
-// 手写字体按需加载：首屏不再拉这 4.5MB，只有用户真的选了该字体写文字时才下载。
+// 手写字体按需加载：首屏不拉这些文件，只有用户真的选了该字体写文字时才下载。
 // 之前在模块顶层就 document.fonts.load 三个字体，导致所有人一进页面就下载全部字体（首屏 4.6MB）。
-const HAND_FONTS = { "'Ma Shan Zheng', cursive": "40px 'Ma Shan Zheng'", "'Zhi Mang Xing', cursive": "40px 'Zhi Mang Xing'", "'Caveat', cursive": "40px 'Caveat'" };
+// 注意：演示夏行楷 4.6MB、鸿雷拙书简体 3.5MB 较大，选中后首次写中文要等下载 —— 这是刻意的取舍：
+// 只在用户真的要用时下载，比让所有人一进页面就等 8MB 划算。
+const HAND_FONTS = {
+  "'XiaXingKai', cursive":      "40px 'XiaXingKai'",
+  "'HongLeiZhuoShu2', cursive": "40px 'HongLeiZhuoShu2'",
+  "'HongLeiZhuoShu', cursive":  "40px 'HongLeiZhuoShu'",
+  "'Caramel', cursive":         "40px 'Caramel'",
+  "'Rancho', cursive":          "40px 'Rancho'",
+  "'Jandle', cursive":          "40px 'Jandle'",
+};
 const fontCache = new Map();
 function ensureFont(font) {
   const spec = HAND_FONTS[font];
@@ -1773,6 +1874,57 @@ backStage.addEventListener('wheel', (e) => {
   const r = backStage.getBoundingClientRect();
   zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.25 : 1 / 1.25);
 }, { passive: false });
+
+// —— 平板双指手势：捏合缩放 + 双指平移 ——
+// 之前平板上只能用「抓手」工具或滚轮缩放，够不到也难用，双指才是平板的通用手势。
+// —— 双指捏合缩放 / 平移（touch 事件驱动）——
+// 关键设计：手势以「两指中点」为锚 —— 缩放围绕中点、平移跟随中点位移，逐事件增量叠加。
+// 为什么用 touch 而不用 Pointer Events：实测 iPadOS Safari 的多指 pointer 事件不可靠，
+// 会漏报 up/cancel，Map 里残留「幽灵手指」——捏合距离按一根冻结的鬼影手指计算，
+// 缩放只剩半速响应、平移几乎不动（用户实测翻车）。e.touches 由系统直接列出当前
+// 所有真实按下的手指，永不残留幽灵，双指状态永远可信。
+const bStageRect = () => backStage.getBoundingClientRect();
+let pinchPrev = null;   // 上一次双指 touchmove 的 { d, mx, my }
+let pinchJustEnded = 0; // 捏合结束时刻：给「触摸双击改字」排除误判用（声明须早于监听器使用）
+let activeBackTouchIds = new Set(); // 当前按在画布上的手指 identifier 集合（touchcancel 也会减回去，避免计数卡死）
+const touchPair = (ts) => ({
+  d: Math.max(1, Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY)),
+  mx: (ts[0].clientX + ts[1].clientX) / 2,
+  my: (ts[0].clientY + ts[1].clientY) / 2,
+});
+function abortBackOp() { // 双指介入时，把所有"单指进行中"的状态清干净
+  if (backDrawing) {
+    if (edit.tool === 'pen') penEnd(); // 钢笔：先把攒着的收锋段画完，别丢笔迹
+    backDrawing = false; bic.globalCompositeOperation = 'source-over'; bic.globalAlpha = 1; snapshot();
+  }
+  if (backDrag) { backDrag = null; syncTextPanel(); }
+  if (backPanning) { backPanning = false; backPanFrom = null; backStage.classList.remove('panning'); }
+  updateCursor();
+}
+backStage.addEventListener('touchstart', (e) => {
+  if (edit.mode !== 'back' || e.touches.length < 2) return;
+  e.preventDefault();     // 抢在 Safari 页面缩放/长按接管之前（必须 passive:false）
+  abortBackOp();          // 双指优先：停笔、放弃文本拖拽/抓手平移
+  pinchPrev = touchPair(e.touches);
+}, { passive: false, capture: true });
+backStage.addEventListener('touchmove', (e) => {
+  if (e.touches.length < 2) {
+    // 单指作画时阻止 Safari 把拖拽当成系统手势（会发 pointercancel 掐断笔画）
+    if (edit.mode === 'back' && backDrawing) e.preventDefault();
+    return;
+  }
+  if (!pinchPrev) return;
+  e.preventDefault();
+  const g = touchPair(e.touches), r = bStageRect();
+  // ① 缩放：围绕两指当前中点，增量比例。zoomAt 内部限幅（8%~800%）并 applyView
+  zoomAt(g.mx - r.left, g.my - r.top, g.d / pinchPrev.d);
+  // ② 平移：中点位移直接叠加到视图平移量（bview.x/y 本就是舞台坐标系）
+  bview.x += g.mx - pinchPrev.mx;
+  bview.y += g.my - pinchPrev.my;
+  applyView();
+  pinchPrev = g;
+}, { passive: false, capture: true });
+// 捏合结束（pinchPrev 复位）已并入下面的 backTouchEnd 统一处理，这里不再单独挂 pinchEnd。
 // —— 画笔光标：实心圆，颜色=当前画笔色，直径=笔宽（换算到屏幕像素） ——
 const brushCursor = $('edBrushCursor');
 let cursorXY = null;
@@ -1783,6 +1935,7 @@ function brushDiameter() {
   if (t === 'pencil') return Math.max(1, edit.size * .32);
   if (t === 'ball') return Math.max(1, edit.size * .28);
   if (t === 'air') return Math.max(10, edit.size * 4.8);
+  if (t === 'pen') return Math.max(2, edit.size * PEN_MAX); // 钢笔：显示峰值宽度（慢写时的最粗处）
   return edit.size; // 文字/抓手
 }
 function updateCursor() {
@@ -1812,11 +1965,157 @@ function applyBackBrush() {
   bic.globalAlpha = 1;
   bic.globalCompositeOperation = edit.tool === 'eraser' ? 'destination-out' : 'source-over';
   if (edit.tool === 'pencil') { bic.lineWidth = Math.max(1, edit.size * .32); }
+  else if (edit.tool === 'pen') { /* 钢笔线宽逐点变化，由 penStep 计算，这里不设 */ }
   else if (edit.tool === 'ball') { bic.lineWidth = Math.max(1, edit.size * .28); }
   else if (edit.tool === 'marker') { bic.lineWidth = edit.size * 1.6; } // 油性笔：实色覆盖
   else if (edit.tool === 'eraser') { bic.lineWidth = Math.max(5, edit.size * 1.5); }
 }
 function drawSeg(a, b) { bic.beginPath(); bic.moveTo(a.x, a.y); bic.lineTo(b.x, b.y); bic.stroke(); }
+
+// —— 钢笔：靠"笔压 + 笔速"驱动的变宽笔触，笔画边缘才有棱、出锋才有锋 ——
+// 为什么不能用 lineTo：Canvas 的 stroke() 只有一条固定线宽路径，做不出粗细变化。
+// 正确做法是沿笔画中线取样，为每个采样点算一个笔宽，再把"上缘点 + 下缘点"
+// 连成一条闭合多边形填充。这样笔画两侧的斜线段就是你要的"棱"。
+//
+// 笔宽公式（细尖 / 接近签字笔）：w = wMax * (0.22 + 0.78 * press^1.15) * speedFactor
+//   press      —— 真实笔压优先（Apple Pencil / 支持压感的触控笔）；没有则用速度反推
+//   speedFactor—— 画得快 → 收细；慢 → 稍加粗。这是真实书写的规律，也叫"飞白收敛"
+// 取 0.34 作为下限而非 0：这是被真实测试逼出来的。
+// 最初取 0.22，快速笔画宽度掉到 2px，而手指采样点间距约 4~5px ——
+// 笔宽小于点间距，四边形带之间就漏出缝隙，笔画直接断成虚线。
+// 现在的做法：① 下限抬到 0.34，保证任何速度下笔宽都不会细过采样间距；
+//          ② penStep 里再按实际点间距兜一个底（见 minGapW），从根上堵住漏洞。
+const PEN_MIN = 0.34, PEN_MAX = 1.0, PEN_GAMMA = 1.15;
+// 钢笔笔迹：保存「整笔」的所有采样点，同时记录已光栅化到第几个点。
+// 关键设计（踩过一次坑才定下来的）：不要"每 3 个点画一个独立多边形"——
+// 那样每段的两端法线朝向不一致，段与段之间会留下缝隙，快速细笔画直接变成虚线。
+// 现在改成「四边形带」：第 i 段画 penPts[i-1]→penPts[i] 这一个四边形，
+// 而第 i-1 段和第 i 段共用 penPts[i] 这个点，两边算出的法线完全相同 → 严丝合缝。
+// 法线一律基于「全局点数组」计算（不是基于当前小段），这是保证接缝连续的前提。
+let penPts = [], penDrawn = 0;
+const penReset = () => { penPts.length = 0; penDrawn = 0; };
+function penWidthAt(press, spd) {
+  const p = Math.max(PEN_MIN, Math.min(1, press));
+  // 速度因子：用 spd^0.6 让"收细"在低速段就启动——中等速度已能明显看到笔锋，
+  // 不必写很快；快笔收到 0.30、慢笔回到 1.0，范围比旧版更宽、更"看得见"。
+  const s = 1.0 - 0.72 * Math.pow(Math.max(0, Math.min(1, spd)), 0.6);
+  return Math.max(1, edit.size * PEN_MAX * (PEN_MIN + (1 - PEN_MIN) * Math.pow(p, PEN_GAMMA)) * s);
+}
+// 全局法线：只用整笔点数组里该点的前后邻居，保证相邻段算出同一个偏移
+function penNormal(i) {
+  const a = penPts[Math.max(0, i - 1)], b = penPts[Math.min(penPts.length - 1, i + 1)];
+  let dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return { nx: -dy / len, ny: dx / len };
+}
+const penEdge = (i) => { const n = penNormal(i); const h = Math.max(.5, penPts[i].w / 2); return { n, h }; };
+// 把「尚未光栅化」的采样点补画成四边形带
+function penRaster() {
+  // 首点画个圆点：点一下也要有痕迹，且给后续四边形一个起点
+  if (penDrawn === 0) {
+    const p0 = penPts[0];
+    bic.beginPath(); bic.arc(p0.x, p0.y, Math.max(.5, p0.w / 2), 0, 7); bic.fill();
+    penDrawn = 1;
+  }
+  for (let i = penDrawn; i < penPts.length; i++) {
+    const a = penPts[i - 1], b = penPts[i];
+    const ea = penEdge(i - 1), eb = penEdge(i);
+    bic.beginPath();
+    bic.moveTo(a.x + ea.n.x * ea.h, a.y + ea.n.y * ea.h);
+    bic.lineTo(b.x + eb.n.x * eb.h, b.y + eb.n.y * eb.h);
+    bic.lineTo(b.x - eb.n.x * eb.h, b.y - eb.n.y * eb.h);
+    bic.lineTo(a.x - ea.n.x * ea.h, a.y - ea.n.y * ea.h);
+    bic.closePath();
+    bic.fill();
+    // 圆接头：这是笔画"不断线"的真正保障。
+    // 半径放大到笔宽的 0.70（> 0.5），让相邻两个接头必然重叠；同时把曲线外侧因
+    // 直线段逼近圆弧而产生的楔形缺口也盖住（配合下面的加密采样双保险）。
+    // 这样即使手指快速划动、点间距远大于笔宽，四边形之间漏出的楔形缺口也会被盖住，
+    // 而笔宽本身可以放心地做得很细 —— 速度因子因此能真正起作用（快笔就是更细）。
+    // 笔触全不透明 + source-over，重叠不会累积 alpha，橡皮擦依然擦得干净。
+    const r = Math.max(.6, b.w * 0.70);
+    bic.beginPath(); bic.arc(b.x, b.y, r, 0, 7); bic.fill();
+  }
+  penDrawn = penPts.length;
+}
+// 笔压/速度状态：从指针事件取，供 penStep 用
+let penLast = null, penLastT = 0, penPress = 0.6;
+// 取"事件时间"：真实指针事件统一用 e.timeStamp（含 coalesced 各自被采样到的真实时刻）。
+// 关键修复：iPad 会把同一帧内的多次原始采样合并进一个 pointermove 再发 coalesced 列表，
+// 这些点的 performance.now() 几乎相同 → dt≈0 被夹成 1ms → 算出的速度爆表 → 笔宽被压到最细。
+// 结果就是慢速书写（本该粗）的笔迹中间被算成"快笔细线"，粗笔画里出现一串细点/断口，
+// 且笔越粗对比越刺眼。改用每个合并点自带的 timeStamp，速度才真实。测试桩用 __penClock 注入假时钟。
+function penNow(e) {
+  if (e && e.timeStamp) return e.timeStamp;
+  return (globalThis.__penClock != null) ? globalThis.__penClock : performance.now();
+}
+function penStep(pt, e) {
+  const now = penNow(e);
+  // 真实笔压：支持的设备直接用（Apple Pencil / 部分手写笔），没有则为 0
+  const raw = e && e.pressure != null ? e.pressure : 0;
+  if (raw > 0) penPress = Math.max(PEN_MIN, Math.min(1, raw));
+  const prevPt = penPts.length ? penPts[penPts.length - 1] : null;
+  const gap = prevPt ? Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y) : 0;
+  let spd = 0;
+  if (penLast) {
+    const d = Math.hypot(pt.x - penLast.x, pt.y - penLast.y);
+    const dt = Math.max(1, now - penLastT);
+    // 归一化基准 1.1 画布px/ms ≈ 66px/s 即判为"较快"：把门槛降下来，
+    // 让中等速度也能触发收细、出现笔锋，不用刻意写很快。
+    spd = Math.min(1, d / dt / 1.1);
+  }
+  // 无压感设备：用"慢=重、快=轻"反推虚拟压感，让钢笔依然有粗细变化
+  if (raw <= 0) {
+    if (penLast && spd > 0) {
+      const target = 1 - spd * 0.8;
+      penPress = penPress * 0.7 + target * 0.3; // 平滑，避免笔宽抖成锯齿
+    }
+    if (!penLast) penPress = 0.6; // 落笔默认中段起笔
+  }
+  penLast = { x: pt.x, y: pt.y }; penLastT = now;
+  // 抖动过滤：位移极小的点丢弃，否则原地微颤会灌进大量重复点、内存与接缝都变差
+  if (prevPt && gap < 0.35) return;
+  // 笔宽完全由「压力 + 速度」决定，不做任何下限兜底（兜底会抵消速度因子的收细）。
+  const w = Math.max(1, penWidthAt(penPress, spd));
+  // —— 采样点加密（平板断点 + 曲线缺口的根治手段）——
+  // iPad Safari 的 pointermove 很稀：快速书写时相邻事件能差 20~40px，而笔宽只有几 px，
+  // 圆接头（半径 0.70w）盖不住这么大的缝 → 笔画断成一颗颗圆点（实测截图）。
+  // 同时，慢速粗笔在曲线处，直线段逼近圆弧会留出楔形缺口；缺口深度 ∝ 步长²，
+  // 把步长从 0.75w 缩到 0.35w 后，任意合理曲率的缺口都被圆接头兜住。
+  // 这里把过大的间隔按 0.35w 的步长插值出中间点，宽度在两点间线性过渡：
+  // 相邻四边形/圆接头必然重叠，**任何事件频率、任何书写速度、任何笔宽下都是实线**，
+  // 而笔宽本身仍由速度/压力决定，快细慢粗的手感不受影响。
+  if (!prevPt || gap <= w * 0.35) {
+    penPts.push({ x: pt.x, y: pt.y, w });
+  } else {
+    const step = w * 0.35, n = Math.ceil(gap / step);
+    for (let k = 1; k <= n; k++) {
+      const t = k / n;
+      penPts.push({
+        x: prevPt.x + (pt.x - prevPt.x) * t,
+        y: prevPt.y + (pt.y - prevPt.y) * t,
+        w: prevPt.w + (w - prevPt.w) * t,
+      });
+    }
+  }
+  penRaster();
+}
+// 收笔：先补画完所有采样点，再补一个"出锋"点 —— 抬笔时把笔宽压到最细，
+// 笔画末端才是尖的（锋），而不是齐刷刷切断。
+function penEnd() {
+  if (!penPts.length) { penLast = null; return; }
+  penRaster();
+  // 必须先取末点、再清数组——之前顺序反了（penReset 先清空），last 永远是 undefined，
+  // 下面读 last.x 直接抛 TypeError：抬笔必炸 → endBackPointer 里 snapshot() 不执行、
+  // backDrawing 残留为 true，后续每一笔的状态都被污染（平板实测翻车的根因之一）。
+  const last = penPts[penPts.length - 1];
+  penReset(); penLast = null;
+  // 出锋：直接在墨层上补一个小圆点（半径 = 末点笔宽的 0.34），笔画末端收成尖。
+  // 不 push 出锋点走 penRaster —— 那会连带触发圆接头，在末端留圆头小球，把锋毁掉。
+  bic.beginPath();
+  bic.arc(last.x, last.y, Math.max(.5, last.w * PEN_MIN), 0, 7);
+  bic.fill();
+}
 function stampAir(x, y) {
   const r = Math.max(5, edit.size * 2.4);
   bic.globalCompositeOperation = 'source-over'; bic.globalAlpha = .07;
@@ -1938,10 +2237,16 @@ function restoreBrushUI() { // 未选中文字时，滑杆回到「粗细」语�
 }
 
 // —— 指针交互：画笔 / 抓手 / 文本选中移动缩放 ——
+// 互斥守卫：一旦进入双指手势，单指绘制/平移/文本拖动必须全部让位。
+// 否则第二根手指落下时，touchstart 里的 abortBackOp 虽已停笔，这里却会立刻又起一笔新笔画。
+const backBusyWithPinch = () => edit.mode === 'back' && pinchPrev != null;
 backStage.addEventListener('pointerdown', (e) => {
   if (edit.mode !== 'back') return;
+  if (backBusyWithPinch()) return; // 双指手势优先，本指只参与捏合
+  // 第二根手指的 pointerdown 先于它的 touchstart 到达：此时 pinchPrev 还是 null，
+  // 但第一根手指的 touchstart 已把 activeBackTouches 记到 1 —— 用它挡住第二指起笔。
+  if (e.pointerType !== 'mouse' && activeBackTouchIds.size > 0) return;
   e.preventDefault();
-  backStage.setPointerCapture(e.pointerId);
   const p = inkPos(e);
   // 平移：右键拖拽（桌面最顺手）/ 中键 / 空格 / 抓手工具（触屏）
   if (e.button === 2 || e.button === 1 || edit.tool === 'pan' || e.getModifierState('Space')) {
@@ -1984,10 +2289,18 @@ backStage.addEventListener('pointerdown', (e) => {
   // 其余情况：画笔
   if (hit !== selText) { selText = -1; syncTextPanel(); restoreBrushUI(); renderTexts(); }
   backDrawing = true; backLast = p;
-  applyBackBrush();
-  if (edit.tool === 'air') stampAir(p.x, p.y); else drawSeg(p, p);
+  applyBackBrush(); // 统一设置颜色/合成模式/线宽（钢笔的线宽稍后由 penStep 逐点覆盖）
+  if (edit.tool === 'air') stampAir(p.x, p.y);
+  else if (edit.tool === 'pen') { penReset(); penPress = 0.6; penLast = null; penStep(p, e); } // 落笔即起锋
+  else drawSeg(p, p);
 });
-backStage.addEventListener('pointermove', (e) => {
+// 画笔移动/抬笔监听挂在 window：iPad 上若在 touch/笔 指针调 setPointerCapture 会秒发
+// pointercancel 把笔画掐断（"画着画着没墨"的元凶）。去掉捕获后用 window 兜底，
+// 手指移出画布或偶发 cancel 都还能收到 move/up，整笔不再丢墨。
+window.addEventListener('pointermove', (e) => {
+  if (edit.mode !== 'back') return;
+  // 双指手势期间不参与单指绘制（abortBackOp 已清空状态，这里只是双保险）
+  if (backBusyWithPinch()) return;
   const p = inkPos(e);
   if (backPanning && backPanFrom) {
     bview.x = backPanFrom.vx + (e.clientX - backPanFrom.cx);
@@ -2021,9 +2334,36 @@ backStage.addEventListener('pointermove', (e) => {
     return;
   }
   if (!backDrawing) return;
-  if (edit.tool === 'air') stampAir(p.x, p.y); else drawSeg(backLast, p);
+  if (edit.tool === 'air') stampAir(p.x, p.y);
+  else if (edit.tool === 'pen') {
+    // 高分屏设备（iPad 120Hz）会把两次事件之间的原始采样点合并进 coalesced 列表，
+    // 取出来逐点喂给 penStep，采样密度翻倍、曲线更顺滑（配合插值加密双保险）
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+    if (evs && evs.length > 1) for (const ce of evs) penStep(inkPos(ce), ce);
+    else penStep(p, e);
+  }
+  else drawSeg(backLast, p);
   backLast = p;
 });
+// 用 Set 记录画布上"当前按着的手指 identifier"：touchcancel 也会减回去，避免计数漏减卡死。
+// touchend 晚于 pointer 事件到达，用它判断"其实没抬手"；全部抬起且还在画 → 兜底收笔。
+backStage.addEventListener('touchstart', (e) => {
+  for (const t of e.changedTouches) activeBackTouchIds.add(t.identifier);
+}, { passive: true, capture: true });
+const backTouchEnd = (e) => {
+  for (const t of e.changedTouches) activeBackTouchIds.delete(t.identifier);
+  // 双指手势结束：剩余手指不足两根就复位 pinchPrev（余指不再接笔画）
+  if (pinchPrev && e.touches.length < 2) { pinchPrev = null; pinchJustEnded = performance.now(); }
+  // 正常顺序是 pointerup → touchend；若这里 backDrawing 还开着，说明 pointerup 被系统吞了，
+  // 必须手动收笔并落一次快照，否则这一笔永远不结束、撤销栈也会错位。
+  if (activeBackTouchIds.size === 0 && backDrawing) {
+    if (edit.tool === 'pen') penEnd(); // 钢笔兜底收锋
+    backDrawing = false; bic.globalCompositeOperation = 'source-over'; bic.globalAlpha = 1;
+    snapshot();
+  }
+};
+backStage.addEventListener('touchend', backTouchEnd, { capture: true, passive: true });
+backStage.addEventListener('touchcancel', backTouchEnd, { capture: true, passive: true });
 const endBackPointer = (e) => {
   if (backPanning) {
     backPanning = false; backPanFrom = null;
@@ -2033,16 +2373,62 @@ const endBackPointer = (e) => {
   }
   if (backDrag) { if (backDrag.kind === 'move' && !backDrag.moved) { /* 单击选中，不撤销 */ } else snapshot(); backDrag = null; syncTextPanel(); return; }
   if (!backDrawing) return;
+  // 兜底第 4 道防线：某些 iPadOS 版本即使 preventDefault 也会发 pointercancel。
+  // 只要手指其实还按在画布上（有活跃 touch 且落在舞台内），就当作"系统抽风"，
+  // 不结束这一笔——否则用户正画到一半笔画会被凭空截断，比选区更让人崩溃。
+  if (e.type === 'pointercancel' && e.pointerType !== 'mouse' && activeBackTouchIds.size > 0) return;
+  // 收笔：把钢笔最后那一小段（含出锋）画完再落快照，否则最后几个采样点会丢
+  if (edit.tool === 'pen') penEnd();
   backDrawing = false; bic.globalCompositeOperation = 'source-over'; bic.globalAlpha = 1;
   snapshot();
 };
-backStage.addEventListener('pointerup', endBackPointer);
-backStage.addEventListener('pointercancel', endBackPointer);
-backStage.addEventListener('dblclick', (e) => { // 双击文字改字
+window.addEventListener('pointerup', endBackPointer);
+window.addEventListener('pointercancel', endBackPointer);
+backStage.addEventListener('dblclick', (e) => { // 双击文字改字（鼠标）
   const i = hitText(inkPos(e));
   if (i >= 0) { selText = i; syncTextPanel(); renderTexts(); addTextAt(backTexts[i], true); }
 });
+// 触摸双击改字：dblclick 在触屏不可靠，用两次轻点判定；先选中再改（与鼠标双击同效）
+let backTap = null;
+backStage.addEventListener('pointerup', (e) => {
+  if (e.pointerType === 'mouse' || edit.mode !== 'back' || backPanning || backDrag) { backTap = null; return; }
+  if (performance.now() - pinchJustEnded < 350) { backTap = null; return; } // 排除捏合误判
+  const now = performance.now();
+  const p = inkPos(e);
+  const near = backTap && Math.hypot(p.x - backTap.x, p.y - backTap.y) < 40 / bview.z;
+  if (near && now - backTap.t < 700) {
+    backTap = null;
+    const i = hitText(p);
+    if (i >= 0) { selText = i; syncTextPanel(); renderTexts(); addTextAt(backTexts[i], true); }
+  } else backTap = { x: p.x, y: p.y, t: now };
+});
 backStage.addEventListener('contextmenu', (e) => e.preventDefault()); // 右键用于平移，不弹系统菜单
+
+// —— iPadOS / iOS「长按劫持」三道防线 ——
+// 现象：平板上画笔停顿约 0.5 秒，Safari 认为你在长按一个「图片元素」，于是给 canvas
+// 盖上蓝色选区 + 弹「拷贝/存储到照片」气泡，并发 pointercancel 把笔画掐断。
+// CSS 里的 user-select / touch-callout 只能压掉视觉表现，压不住系统发来的 pointercancel，
+// 所以这里必须再用 JS 主动 preventDefault 抢在系统接管之前。
+// 注意 touchstart 必须用 { passive: false }，否则 preventDefault 不生效。
+const edRoot = $('editor');
+const edTextPopEl = $('edTextPop'); // 提前取引用：下面几个监听器要用（比直接摸 const edTextPop 更稳）
+edRoot.addEventListener('selectstart', (e) => {
+  // 只拦选择行为，不拦输入框（edTextPop 已单独放开 user-select，这里再放行一次更稳）
+  if (edTextPopEl.contains(e.target)) return;
+  e.preventDefault();
+});
+edRoot.addEventListener('touchstart', (e) => {
+  if (edTextPopEl.contains(e.target)) return; // 文本框里的正常触摸放行
+  // 只在画布/舞台区域拦截；右侧工具栏按钮要保留点击
+  if (!backStage.contains(e.target)) return;
+  if (e.touches.length > 1) return;                      // 多指留给缩放/平移
+  e.preventDefault();                                    // 禁止系统长按接管
+}, { passive: false });
+edRoot.addEventListener('touchmove', (e) => {
+  if (backStage.contains(e.target)) e.preventDefault();  // 禁止画布区域滚动/橡皮筋
+}, { passive: false });
+// 有些 iOS 版本把长按识别为 dragstart（拖拽图片），一并拦掉
+edRoot.addEventListener('dragstart', (e) => e.preventDefault());
 addEventListener('keydown', (e) => { // 空格临时抓手（Esc 由文件前部的全局处理器统一处理）
   if (edit.mode !== 'back') return;
   if (e.code === 'Space' && edTextPop.hidden) { backStage.style.cursor = 'grab'; e.preventDefault(); }
@@ -2080,7 +2466,10 @@ function commitText() {
   }
   const cur = backTexts[selText];
   snapshot(); syncTextPanel();
-  // 手写字体可能此刻才刚开始下载 → 等它就位后再测量与绘制，否则会用 fallback 字体量错框宽
+  // 手写字体可能此刻才刚开始下载 → 等它就位后再测量与绘制，否则会用 fallback 字体量错框宽。
+  // 夏行楷(4.6MB)/鸿雷拙书(3.5MB) 首次使用要等一会儿，提示一句免得以为卡死。
+  const bigFont = /XiaXingKai|HongLeiZhuoShu2/.test(cur.font || '');
+  if (bigFont) toast('首次使用该字体，正在下载…（约 4MB，仅此一次）', 4000);
   ensureFont(cur.font).then(() => {
     const m = measureText(cur); cur.w = m.w; cur.h = m.h;
     renderTexts();
@@ -2217,8 +2606,9 @@ async function addPhoto(dataURL, width, height, fitted, backURL, extra) {
 }
 // —— 持久化：优先 IndexedDB（容量大），同时写一份 localStorage 兜底 ——
 // 照片是 base64 大图，localStorage 通常只有 5MB 几张就满；满了若不提示，刷新后用户会以为作品丢了
-const DB_NAME = 'paper-cloud', STORE = 'kv';
-let dbPromise = null;
+// 用 var 声明：storeGet 可能在模块开头就被调用（早于本行的 let/const 初始化），
+// 用 let/const 会触发 TDZ（Cannot access before initialization）；var 提升保证可安全访问
+var DB_NAME = 'paper-cloud', STORE = 'kv', dbPromise = null;
 function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((res, rej) => {
@@ -2313,6 +2703,9 @@ function watchStorage() {
 }
 $('add').onclick = () => openPicker('add');
 $('replace').onclick = () => { if (sel >= 0) openPicker('replace', sel); };
+// 触摸设备兜底入口（按钮仅在 pointer:coarse 时显示）：编辑 / 翻转
+$('editBtn').onclick = () => { if (sel >= 0) reeditPhoto(sel); };
+$('flipBtn').onclick = () => { if (sel >= 0) flipSheet(sel); };
 $('reset').onclick = async () => {
   if (!confirm('确定要清除你添加/替换的照片，恢复到最初的 6 张示例吗？此操作不可撤销。')) return;
   try {
@@ -2323,15 +2716,185 @@ $('reset').onclick = async () => {
   location.reload();
 };
 
+// ---------------------------------------------------------------------------
+// 导出「只读分享版」单文件 HTML
+// ---------------------------------------------------------------------------
+// 思路：把当前云里的照片与背面全部转成 base64 内嵌进 window.__PC_DATA__，
+// 再把 index.html / main.js / style.css 的内容拼成一份完整 HTML。
+// 关键取舍：**剔除手写字体**（3MB×3）——只读版不能写字，字体用不上；
+// 背面里的手写字早已烤进图片，不需要字体。
+async function toDataURL(url) {
+  const blob = await (await fetch(url)).blob();
+  return await new Promise((res) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = () => res(null);
+    fr.readAsDataURL(blob);
+  });
+}
+// 作品名：没起名时统一显示占位名 "My Photos"；起名后标签页标题、按钮、导出文件名全部跟着变
+const WORK_NAME_KEY = 'papercloud.name';
+const DEFAULT_WORK_NAME = 'My Photos';
+function currentWorkName() {
+  if (READONLY) return String(EMBEDDED.name || document.title).replace(/（只读分享版）$/, '').trim() || DEFAULT_WORK_NAME;
+  try { return (localStorage.getItem(WORK_NAME_KEY) || '').trim() || DEFAULT_WORK_NAME; }
+  catch { return DEFAULT_WORK_NAME; }
+}
+// 作品名只服务于"导出"这一件事：不再占用顶栏位置，改成导出时弹窗问一次。
+function paintWorkName() {
+  const n = currentWorkName();
+  // 没起名时保留站点原标题当品牌标识，起名后才覆盖成用户自己的名字
+  const custom = READONLY ? true : (localStorage.getItem(WORK_NAME_KEY) || '').trim();
+  if (custom) document.title = n;
+  return n;
+}
+// 底部操作提示：按输入方式给不同文案。平板上没有滚轮，写"滚轮缩放"等于骗人
+function refreshHint() {
+  const h = $('hint');
+  if (!h || READONLY) return;
+  const coarse = matchMedia('(pointer: coarse)').matches;
+  h.textContent = coarse
+    ? '单指拖动环视 · 双指缩放 · 点照片查看'
+    : '拖动环视 · 滚轮缩放 · 点照片查看';
+}
+refreshHint();
+function setWorkName(name) {
+  try {
+    if (name) localStorage.setItem(WORK_NAME_KEY, name);
+    else localStorage.removeItem(WORK_NAME_KEY);
+  } catch (e) {}
+  return paintWorkName();
+}
+// 命名弹窗：Promise 化，确认返回名字、取消返回 null（导出流程据此中止）
+const nameDlg = $('nameDlg'), nameInput = $('nameInput');
+function askWorkName(okLabel = '确定') {
+  return new Promise((resolve) => {
+    nameInput.value = currentWorkName();
+    $('nameOk').textContent = okLabel;
+    nameDlg.hidden = false;
+    nameInput.focus();
+    nameInput.select(); // 平板上不 select 的话光标会停在末尾，改名要反复退格
+    const done = (v) => {
+      nameDlg.hidden = true;
+      nameInput.removeEventListener('keydown', onKey);
+      $('nameOk').removeEventListener('click', onOk);
+      $('nameCancel').removeEventListener('click', onCancel);
+      nameDlg.removeEventListener('pointerdown', onBg);
+      resolve(v);
+    };
+    const onOk = () => done(nameInput.value.trim());
+    const onCancel = () => done(null);
+    const onBg = (e) => { if (e.target === nameDlg) onCancel(); }; // 点遮罩 = 取消
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); onOk(); }
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    nameInput.addEventListener('keydown', onKey);
+    $('nameOk').addEventListener('click', onOk);
+    $('nameCancel').addEventListener('click', onCancel);
+    nameDlg.addEventListener('pointerdown', onBg);
+  });
+}
+paintWorkName();
+
+async function exportReadOnly() {
+  const btn = $('exportBtn');
+  const LABEL = '⬇ 导出分享版';
+  btn.disabled = true;
+  btn.textContent = '命名中…';
+  const say = (m) => { btn.textContent = m; };
+  try {
+    // 先问名字：这就是命名唯一的入口。取消 = 不导出，不留半成品
+    const typed = await askWorkName('确定并导出');
+    if (typed == null) { btn.textContent = LABEL; return; } // 取消：不导出
+    const workName = setWorkName(typed);
+
+    // 1) 把每张照片的正面与背面转成 base64
+    const list = [];
+    for (let i = 0; i < photos.length; i++) {
+      const p = photos[i];
+      say(`导出中 ${i + 1}/${photos.length}…`);
+      const src = await toDataURL(p.src);
+      const back = p.back ? await toDataURL(p.back) : null;
+      if (!src) continue;
+      list.push({
+        id: p.id, description: p.description, photographer: p.photographer,
+        source_page: p.source_page || '', width: p.width, height: p.height,
+        aspect: p.aspect, fitted: !!p.fitted, src, back: back || undefined,
+        // raw/cfg/texts 不带：分享版只读，背面已是成品图、不需要再进编辑器还原
+      });
+    }
+    say('打包资源…');
+    // 2) 取三份源码（fetch 读本文件，file:// 下同样可用）
+    const [htmlSrc, cssSrc, jsSrc] = await Promise.all([
+      fetch('index.html').then((r) => r.text()),
+      fetch('style.css').then((r) => r.text()),
+      fetch('main.js').then((r) => r.text()),
+    ]);
+    // 3) 内联 JS 前必须转义 "</script>"，否则 HTML 解析器会在这里提前截断脚本块
+    const jsSafe = jsSrc.replace(/<\/script/gi, '<\\/script');
+    const cssSafe = cssSrc.replace(/<\/style/gi, '<\\/style');
+    const payload = JSON.stringify({ readonly: true, name: workName, photos: list })
+      .replace(/</g, '\\u003c'); // 防 JSON 里的 < 破坏 script 块
+    // 4) 拼装：直接按 index.html 的固定结构替换。
+    //    替换用「函数形式」，避免 $& / $1 等替换模式与内容里的 $ 冲突。
+    //    先确认两个标签都存在（不存在说明页面结构变了，别硬拼）
+    const hasCssTag = htmlSrc.includes('<link rel="stylesheet" href="style.css">');
+    const hasJsTag = /<script type="module" src="main\.js[^"]*"><\/script>/.test(htmlSrc);
+    if (!hasCssTag || !hasJsTag) throw new Error('页面结构与预期不符（找不到 style.css 或 main.js 的引用标签）');
+    // 作品名写进 <title>，分享出去对方一眼看到是什么
+    const out = htmlSrc
+      .replace(/<title>[\s\S]*?<\/title>/, () => `<title>${workName.replace(/[<>&]/g, '')}</title>`)
+      .replace('<link rel="stylesheet" href="style.css">', () => `<style>\n${cssSafe}\n</style>`)
+      .replace(/<script type="module" src="main\.js[^"]*"><\/script>/,
+        () => `<script>window.__PC_DATA__=${payload};</script>\n<script type="module">\n${jsSafe}\n</script>`);
+    const blob = new Blob([out], { type: 'text/html;charset=utf-8' });
+    const mb = (blob.size / 1024 / 1024).toFixed(1);
+    window.__lastExport = { html: out, size: blob.size, name: workName }; // 调试/验证出口：便于自动化测试取文件
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    // 文件名用作品名；去掉 Windows/文件系统不允许的字符
+    const safe = workName.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || DEFAULT_WORK_NAME;
+    a.download = safe + '（只读分享版）.html';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast(`已导出「${workName}」${mb} MB · 双击即可离线打开，只能浏览不能编辑`, 6000);
+  } catch (e) {
+    console.warn('导出失败', e);
+    toast('导出失败：' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⬇ 导出分享版';
+  }
+}
+$('exportBtn').onclick = exportReadOnly;
+
 function mulberry32(a) {
   return () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+// ---------------------------------------------------------------------------
+// 只读分享模式：隐藏所有写入入口，提示改为"只读"。浏览、聚焦、翻转看背面全部保留。
+// ---------------------------------------------------------------------------
+if (READONLY) {
+  for (const id of ['add', 'reset', 'replace', 'editBtn', 'exportBtn', 'editName', 'file', 'nameDlg']) { const el = $(id); if (el) el.remove(); }
+  const hint = $('hint');
+  // 分享版标题用作者起的作品名；没起名就退回页面标题
+  const name = (EMBEDDED.name || '').trim();
+  if (name) { document.title = name; if (hint) hint.textContent = `「${name}」· 只读分享版 · 点照片查看与翻面`; }
+  else if (hint) hint.textContent = '只读分享版 · 点照片查看与翻面';
+  addEventListener('keydown', (e) => { // 只读模式下彻底禁用快捷键编辑
+    if (e.key === 'Delete' || e.key === 'Backspace') e.preventDefault();
+  });
 }
 
 // ---------------------------------------------------------------------------
 glReady = true; // 实例缓冲已就绪（flipSheet 需要直接回写）
 live = true; // 一切就绪：可以跑帧了
 window.__pc = { sheets, photos, flipSheet, select }; // 调试/验证出口
+window.__dyn = dyn;
 window.__pick = pick;
+window.__tap = () => lastTap;
 window.__pcBack = () => ({ texts: backTexts, view: bview, sel: selText, undo: backCur, hitText, hitHandle, hitRotate, inkPos, canvasW: backW, canvasH: backH, getDrag: () => backDrag, getTool: () => edit.tool, getFont: () => edit.font, ensureFont }); // 背面画布调试出口
 window.__pcDraw = { rngOf, drawMini, MINI_MIX, DOODLE_COLORS }; // 供构建脚本复用同一套涂鸦绘制（保证示例背面与编辑器风格一致）
 resize();

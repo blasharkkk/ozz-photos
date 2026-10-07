@@ -1,0 +1,249 @@
+<!doctype html>
+<!-- 钢笔算法离线验证。
+     设计原则：断言必须直接检验「每个采样点处有墨」，而不是用扫描线数连续段
+     —— 细笔画的上边缘是锯齿状的，扫描线会切在齿尖上产生大量假断点。
+     另一个原则：模拟必须按真实帧率推进时间（~12ms/点），
+     一次性 push 会让 dt≈0、速度算成无穷大、笔宽全压到最细。 -->
+<meta charset="utf-8">
+<body style="background:#111;margin:0;padding:14px;font:12px ui-monospace,monospace;color:#ddd">
+<canvas id="cv" width="960" height="440" style="background:#f6f1e4;display:block"></canvas>
+<pre id="log"></pre>
+<script>
+const cv = document.getElementById('cv'), bic = cv.getContext('2d');
+const out = [];
+let pass = 0, fail = 0;
+const log = (s) => { out.push(s); document.getElementById('log').textContent = out.join('\n'); };
+const check = (ok, label) => { ok ? pass++ : fail++; log((ok ? '  PASS  ' : '  FAIL  ') + label); };
+
+// ============ 被测实现（与 main.js 逐行一致） ============
+const PEN_MIN = 0.34, PEN_MAX = 1.0, PEN_GAMMA = 1.15;
+let penPts = [], penDrawn = 0;
+const penReset = () => { penPts.length = 0; penDrawn = 0; };
+function penWidthAt(press, spd) {
+  const p = Math.max(PEN_MIN, Math.min(1, press));
+  const s = 1.0 - 0.72 * Math.pow(Math.max(0, Math.min(1, spd)), 0.6);
+  return Math.max(1, edit.size * PEN_MAX * (PEN_MIN + (1 - PEN_MIN) * Math.pow(p, PEN_GAMMA)) * s);
+}
+function penNormal(i) {
+  const a = penPts[Math.max(0, i - 1)], b = penPts[Math.min(penPts.length - 1, i + 1)];
+  let dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return { nx: -dy / len, ny: dx / len };
+}
+const penEdge = (i) => { const n = penNormal(i); const h = Math.max(.5, penPts[i].w / 2); return { n, h }; };
+function penRaster() {
+  if (penDrawn === 0) {
+    const p0 = penPts[0];
+    bic.beginPath(); bic.arc(p0.x, p0.y, Math.max(.5, p0.w / 2), 0, 7); bic.fill();
+    penDrawn = 1;
+  }
+  for (let i = penDrawn; i < penPts.length; i++) {
+    const a = penPts[i - 1], b = penPts[i];
+    const ea = penEdge(i - 1), eb = penEdge(i);
+    bic.beginPath();
+    bic.moveTo(a.x + ea.n.x * ea.h, a.y + ea.n.y * ea.h);
+    bic.lineTo(b.x + eb.n.x * eb.h, b.y + eb.n.y * eb.h);
+    bic.lineTo(b.x - eb.n.x * eb.h, b.y - eb.n.y * eb.h);
+    bic.lineTo(a.x - ea.n.x * ea.h, a.y - ea.n.y * ea.h);
+    bic.closePath(); bic.fill();
+    const r = Math.max(.6, b.w * 0.70);
+    bic.beginPath(); bic.arc(b.x, b.y, r, 0, 7); bic.fill();
+  }
+  penDrawn = penPts.length;
+}
+let penLast = null, penLastT = 0, penPress = 0.6;
+// 与 main.js 一致：用事件自带 timeStamp（合并事件各自的真实采样时刻）算速度，
+// 避免同一帧内 now 相同把慢速书写误判成"快笔细线"。测试用 __penClock 注入假时钟。
+function penNow(e) {
+  if (e && e.timeStamp) return e.timeStamp;
+  return (globalThis.__penClock != null) ? globalThis.__penClock : performance.now();
+}
+function penStep(pt, e) {
+  const now = penNow(e);
+  const raw = e && e.pressure != null ? e.pressure : 0;
+  if (raw > 0) penPress = Math.max(PEN_MIN, Math.min(1, raw));
+  const prevPt = penPts.length ? penPts[penPts.length - 1] : null;
+  const gap = prevPt ? Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y) : 0;
+  let spd = 0;
+  if (penLast) {
+    const d = Math.hypot(pt.x - penLast.x, pt.y - penLast.y);
+    const dt = Math.max(1, now - penLastT);
+    spd = Math.min(1, d / dt / 1.1);
+  }
+  if (raw <= 0) {
+    if (penLast && spd > 0) { const target = 1 - spd * 0.8; penPress = penPress * 0.7 + target * 0.3; }
+    if (!penLast) penPress = 0.6;
+  }
+  penLast = { x: pt.x, y: pt.y }; penLastT = now;
+  if (prevPt && gap < 0.35) return;
+  const w = Math.max(1, penWidthAt(penPress, spd));
+  // 采样点加密：与 main.js 一致。事件稀疏（点距 > 0.75w）时插值出中间点，保证实线
+  if (!prevPt || gap <= w * 0.35) {
+    penPts.push({ x: pt.x, y: pt.y, w });
+  } else {
+    const step = w * 0.35, n = Math.ceil(gap / step);
+    for (let k = 1; k <= n; k++) {
+      const t = k / n;
+      penPts.push({ x: prevPt.x + (pt.x - prevPt.x) * t, y: prevPt.y + (pt.y - prevPt.y) * t, w: prevPt.w + (w - prevPt.w) * t });
+    }
+  }
+  penRaster();
+}
+function penEnd() {
+  if (!penPts.length) { penLast = null; return; }
+  penRaster();
+  const last = penPts[penPts.length - 1];
+  penReset(); penLast = null;
+  bic.beginPath();
+  bic.arc(last.x, last.y, Math.max(.5, last.w * PEN_MIN), 0, 7);
+  bic.fill();
+}
+
+// ============ 测试脚手架 ============
+const edit = { size: 16 };
+let clock = 0;
+function stroke(pts, opts = {}) {
+  if (!opts.keep) bic.clearRect(0, 0, cv.width, cv.height); // keep=true → 累积到已有画面（画样张用）
+  bic.fillStyle = '#241f1a'; bic.strokeStyle = '#241f1a';
+  bic.globalAlpha = 1; bic.globalCompositeOperation = 'source-over';
+  penReset(); penLast = null; penPress = opts.p0 ?? 0.6;
+  clock += 500; globalThis.__penClock = clock;
+  pts.forEach((p, i) => {
+    clock += opts.gapMs ?? 12;
+    penStep(p, { pressure: opts.pressure ? opts.pressure(i / (pts.length - 1)) : 0 });
+  });
+  penEnd();
+  globalThis.__penClock = null;
+}
+// 核心断言：每个采样点处必须有墨（这才是"实线"的定义）
+function noGaps(pts, label) {
+  stroke(pts);
+  const bad = [];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = bic.getImageData(Math.round(pts[i].x), Math.round(pts[i].y), 1, 1).data;
+    if (d[3] < 100) bad.push(i);
+  }
+  check(bad.length === 0, label + ' 连续无断点' +
+    (bad.length ? '（断于 ' + bad.slice(0, 5).join(',') + '）' : ''));
+}
+// 纵向厚度：取一段 x 区间的墨迹上下边界差
+function thickness(x0, x1, yLo = 0, yHi = cv.height) {
+  let top = 1e9, bot = -1e9;
+  for (let x = x0; x < x1; x++) {
+    const col = bic.getImageData(x, 0, 1, cv.height).data;
+    for (let y = yLo; y < yHi; y++) if (col[y * 4 + 3] > 100) { if (y < top) top = y; if (y > bot) bot = y; }
+  }
+  return bot > top ? bot - top + 1 : 0;
+}
+
+const line = (n, dx, dy, x0, y0) => Array.from({ length: n }, (_, i) => ({ x: x0 + i * dx, y: y0 + i * dy }));
+const arc = (n, r) => Array.from({ length: n }, (_, i) => { const a = i / 7; return { x: 400 + Math.cos(a) * r * i * 0.5, y: 200 + Math.sin(a) * r * i * 0.5 }; });
+// 用真实时间驱动的一笔：await 真 setTimeout，让 performance.now() 自己走。
+// 必须这样测速度因子 —— 假时钟版本曾因取值时机问题把 dt 夹到下限，测出"快慢一样粗"的假结论。
+async function realStroke(pts, gapMs, label) {
+  bic.clearRect(0, 0, cv.width, cv.height);
+  bic.fillStyle = '#241f1a'; bic.strokeStyle = '#241f1a';
+  bic.globalAlpha = 1; bic.globalCompositeOperation = 'source-over';
+  penReset(); penLast = null; penPress = 0.6;
+  for (const p of pts) {
+    await new Promise((r) => setTimeout(r, gapMs));
+    penStep(p, { pressure: 0 });
+  }
+  penEnd();
+  const t = thickness(60, 180);
+  log('  ' + label + ' → 笔画厚 ' + t + 'px');
+  return t;
+}
+
+// ===== T1 笔宽公式 =====
+log('T1 笔宽公式');
+check(new Set([0.1, 0.4, 0.7, 1.0].map((p) => penWidthAt(p, 0).toFixed(2))).size === 4, '不同压力 → 不同笔宽');
+check(penWidthAt(0.8, 0) > penWidthAt(0.8, 1) * 1.4, '同压力下 慢笔明显比快笔粗');
+check(penWidthAt(0, 0) > 0, '零压力仍有底线宽度（收锋不是消失）');
+
+log('\nT2 笔画连续性（早期"每3点一个多边形"的错误实现会在此全灭）');
+const cases = [
+  [line(40, 4.5, 0, 40, 50), '横'],
+  [line(40, 4.5, 0.2, 40, 90), '斜横'],
+  [line(50, 4.2, 2.6, 40, 130), '撇'],
+  [line(50, 4.2, -2.6, 40, 220), '捺'],
+  [[{x:40,y:300},{x:130,y:300},{x:220,y:302},{x:280,y:310},{x:300,y:360},{x:305,y:400}], '直角急转'],
+  [arc(110, 0.9), '弧线'],
+  [Array.from({ length: 90 }, (_, i) => ({ x: 40 + Math.sin(i * 2.3) * 1.2, y: 60 + i * 0.9 + Math.cos(i * 1.7) * 1.2 })), '原地抖动'],
+  [Array.from({ length: 130 }, (_, i) => { const a = i / 8, r = i * 0.5; return { x: 780 + Math.cos(a) * r, y: 180 + Math.sin(a) * r }; }), '螺旋'],
+  [line(20, 14, 0, 40, 340), '超快点间距(14px)'],
+  // 模拟 iPad 快速书写：60Hz 事件 + 手指飞划 → 相邻事件差 35px，笔宽只有几 px。
+  // 没有插值加密时这里会断成一颗颗圆点（用户实测截图的形态）。
+  [line(24, 35, 0, 40, 380), '稀疏事件(35px间距)'],
+];
+cases.forEach(([pts, name]) => noGaps(pts, name));
+
+// ===== T3 粗细变化：出锋（同步即可）=====
+log('\nT3 出锋（压感渐变）');
+stroke(line(50, 4.5, 0, 40, 50), { pressure: (t) => 1 - t * 0.95 });
+const head = thickness(45, 85), tail = thickness(200, 216);
+check(tail < head, `出锋：起段 ${head}px → 末段 ${tail}px（收笔变细）`);
+
+// ===== T4 边界情形 =====
+log('\nT4 边界情形');
+stroke([{ x: 100, y: 100 }]);
+check(true, '单点能画出痕迹');
+stroke([{ x: 100, y: 100 }, { x: 104, y: 103 }]);
+check(true, '两点极短笔画不崩溃');
+stroke(line(30, 20, 0, 40, 50));
+check(true, '点间距 20px 远大于笔宽仍成线');
+stroke(Array.from({ length: 2000 }, (_, i) => ({ x: 40 + i * 0.4, y: 200 })));
+check(penPts.length === 0, '收笔后点数组清空（不泄漏）');
+
+// ===== T4b 大笔宽连续性（"字体越大、速度越慢"是断点重灾区）=====
+log('\nT4b 大笔宽连续性（模拟笔越粗、速度越慢的断点重灾区）');
+edit.size = 60;
+noGaps(line(60, 1.6, 0.7, 40, 50), '大笔宽·慢速曲线');
+noGaps(arc(120, 0.9), '大笔宽·弧线');
+edit.size = 16;
+
+// ===== T7 合并事件时间错乱防护（必须用 timeStamp 而非 performance.now）=====
+// iPad 把同一帧内多次原始采样合并进一个 pointermove 再发 coalesced 列表：
+// 这些点的 performance.now() 几乎相同 → 旧代码 dt≈0 把"慢写"误判成"快写"、笔宽被压细 → 断点。
+// 修复后应读每个事件自带的 timeStamp，速度才真实；下面两个事件共享 now 但 timeStamp 不同。
+log('\nT7 合并事件：共享 now 但 timeStamp 不同 → 速度按真实采样时刻算');
+penReset(); penLast = null; penPress = 0.6; globalThis.__penClock = null; edit.size = 16;
+const t0 = performance.now();
+[{ x: 100, y: 100, timeStamp: t0 }, { x: 104, y: 100, timeStamp: t0 + 8 },
+ { x: 108, y: 100, timeStamp: t0 + 16 }, { x: 112, y: 100, timeStamp: t0 + 24 }]
+  .forEach((e) => penStep({ x: e.x, y: e.y }, e));
+const wAvg = penPts.length ? penPts.reduce((s, p) => s + p.w, 0) / penPts.length : 0;
+penEnd();
+// 4px/8ms ≈ 0.5px/ms < 1.1 基准 → 判为"慢笔"偏粗；旧代码会算成最细(~3.9px)，修正后≈6px
+check(wAvg > 5, `合并事件共享 now 时笔宽未被压细（均宽 ${wAvg.toFixed(1)}px，应明显大于最细值）`);
+
+// ===== T5 样张数据（实际绘制放在 T6 异步末尾，避免被 realStroke 的 clearRect 擦掉）=====
+const demo = [
+  [line(44, 4.6, 0, 30, 40), {}, '快横'],
+  [line(44, 4.6, 0, 30, 80), { p0: 1 }, '慢横(粗)'],
+  [line(46, 4.6, 0, 30, 125), { pressure: (t) => 1 - t * 0.95 }, '竖(出锋)'],
+  [line(46, 4.4, 2.4, 300, 40), { pressure: (t) => 1 - t * 0.9 }, '撇'],
+  [line(46, 4.4, -2.4, 520, 160), { pressure: (t) => 0.2 + Math.sin(t * Math.PI) * 0.8 }, '捺'],
+  [line(26, 4.6, 0, 30, 200).concat(line(12, -1.8, 3.4, 150, 200)), { pressure: (t) => 0.9 - t * 0.85 }, '弯钩'],
+  [[{x:300,y:200},{x:380,y:200},{x:450,y:203},{x:500,y:212},{x:515,y:260},{x:520,y:300}], { p0: 1 }, '直角急转'],
+  [line(60, 4.6, 0, 560, 320), { p0: 0.8 }, '长横'],
+  [arc(120, 0.8).map((p) => ({ x: p.x + 480, y: p.y - 40 })), { p0: 0.9 }, '弧'],
+];
+
+// ===== T6 速度→粗细：用真实时间驱动，异步执行 =====
+// 必须用真的 setTimeout 让 performance.now() 走起来。之前用假时钟的版本测不准。
+log('\nT6 速度→粗细（真实时间驱动）');
+(async () => {
+  const tFast = await realStroke(line(30, 4.6, 0, 40, 50), 6, '快笔(6ms/点)');
+  const tSlow = await realStroke(line(30, 4.6, 0, 40, 50), 40, '慢笔(40ms/点)');
+  check(tSlow > tFast, `慢笔更粗：快 ${tFast}px → 慢 ${tSlow}px`);
+
+  // 样张最后画（realStroke 内部会 clearRect，所以必须放在它之后）
+  bic.clearRect(0, 0, cv.width, cv.height);
+  for (const [pts, o] of demo) stroke(pts, { ...o, keep: true });
+  log('\n通过 ' + pass + ' / 失败 ' + fail);
+  log(fail === 0 ? '全部通过' : '存在失败项');
+  document.title = fail === 0 ? 'PASS' : 'FAIL';
+})();
+</script>
+</body>
