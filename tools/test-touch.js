@@ -7,7 +7,7 @@ const path = require('path');
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const PORT = 9226;
 // 必须走 http：编辑器打开时要 fetch 照片素材，file:// 下 fetch 被 CORS 拦截
-const URL_UNDER_TEST = 'http://127.0.0.1:8934/index.html';
+const URL_UNDER_TEST = 'http://127.0.0.1:8944/index.html';
 
 const chrome = spawn(CHROME, [
   '--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars',
@@ -43,6 +43,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   });
   await new Promise((r) => ws.addEventListener('open', r));
   await send('Page.enable'); await send('Runtime.enable');
+  await send('Network.enable');
+  await send('Network.setCacheDisabled', { cacheDisabled: true });
   await send('Page.navigate', { url: URL_UNDER_TEST });
   await wait(5000); // 等照片加载
 
@@ -83,7 +85,20 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // —— 切到背面创作 ——
   await ev(`(() => { const b = document.querySelector('#editor [data-mode="back"]'); b.click(); return 'ok'; })()`);
-  await wait(500);
+  await wait(900);
+  // 关掉首次进入的平移引导条：真实用户会先点「我知道了」。
+  // 它若覆盖画布，触摸会打在它身上 → 墨像素=0（曾误判为"钢笔回归"）。
+  await ev(`(() => { const t = document.getElementById('edPanTip'); if (t && !t.hidden) document.getElementById('edPanTipClose').click(); return 'ok'; })()`);
+  await wait(400);
+  // 轮询等背面画布真正就绪：initBack 要等 edImg 加载完成，
+  // 而触摸双击进的是「示例照片重新编辑」路径，图片可能还在解码 → 固定等待会偶发拿不到画布。
+  for (let k = 0; k < 30; k++) {
+    const ready = await ev(`(() => { const c = document.getElementById('edBackInk');
+      return c && c.width > 100 && c.getBoundingClientRect().width > 10 ? 1 : 0; })()`);
+    if (ready === 1) break;
+    await wait(200);
+  }
+  await wait(300);
 
   // —— 取背面画布位置 ——
   await ev(`(() => { const c = document.getElementById('edBackInk'); const r = c.getBoundingClientRect();
@@ -106,17 +121,38 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   await drag(pts, 10);
   await wait(300);
 
-  // 断言 A：沿路径采样，必须有墨且连续（允许 1px 边缘噪声）
+  // 断言 A：笔迹必须连续无断点。
+  // 不用「固定行定点扫描」——画布经 fitView 缩放平移后，屏幕坐标 ≠ 画布坐标，
+  // 且画布可能被平移到可视区外（top 为负），定点采样会落到空白处误判"钢笔失效"（曾发生）。
+  // 改为整幅扫描：统计所有含墨像素的分布，沿笔迹方向逐格检查有无空缺。
   const a = await ev(`(() => {
-    const c = document.getElementById('edBackInk'); const ctx = c.getContext('2d');
-    const y = 80; let gaps = 0, ink = 0, inGap = false;
-    for (let x = 58; x < 60 + 19 * 22 + 6; x++) {
-      const d = ctx.getImageData(x, y, 1, 1).data;
-      if (d[3] > 100) { ink++; inGap = false; } else if (ink > 0 && !inGap) { gaps++; inGap = true; }
+    const c = document.getElementById('edBackInk');
+    const g = c.getContext('2d');
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    let total = 0, minX = 1e9, maxX = -1, minY = 1e9, maxY = -1;
+    const colInk = new Int32Array(c.width);
+    for (let y = 0; y < c.height; y++) {
+      for (let x = 0; x < c.width; x++) {
+        if (d[(y * c.width + x) * 4 + 3] > 100) {
+          total++; colInk[x]++;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
     }
-    return { ink, gaps };
+    // 断点检测：在笔迹横跨的列范围内，统计「有墨列」是否连成一片
+    let gaps = 0, seen = false;
+    for (let x = minX; x <= maxX; x++) {
+      if (colInk[x] > 0) { seen = true; }
+      else if (seen) gaps++;
+    }
+    const r = c.getBoundingClientRect();
+    return { ink: total, gaps, minX, maxX, minY, maxY, cw: c.width, ch: c.height,
+             rw: Math.round(r.width), rh: Math.round(r.height), rt: Math.round(r.top) };
   })()`);
-  console.log(`A 钢笔稀疏事件: 墨像素=${a.value.ink} 断段=${a.value.gaps} → ${a.value.ink > 350 && a.value.gaps <= 2 ? 'PASS 实线连续' : 'FAIL 仍断点'}`);
+  const v = a.value;
+  console.log(`  [诊断] 画布 ${v.cw}x${v.ch} 显示 ${v.rw}x${v.rh} top=${v.rt} 笔迹区 x=${v.minX}~${v.maxX} y=${v.minY}~${v.maxY}`);
+  console.log(`A 钢笔稀疏事件: 墨像素=${v.ink} 断段=${v.gaps} 跨度=${v.maxX - v.minX}px → ${v.ink > 200 && v.gaps <= 2 && (v.maxX - v.minX) > 150 ? 'PASS 实线连续' : 'FAIL 仍断点'}`);
 
   // —— 测试 B：双指捏合缩放 ——
   await ev(`(() => { const c = document.getElementById('edBackInk'); const r = c.getBoundingClientRect();

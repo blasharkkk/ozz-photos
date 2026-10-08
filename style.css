@@ -19,6 +19,53 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2927; col
 .toolbar button:hover { background: #ffffff26; }
 @media (max-width: 560px) { .toolbar { gap: 6px; padding: 5px 6px; } .toolbar button { padding: 0 11px; font-size: 12px; } }
 
+/* 「作品」下拉菜单：顶栏收拢导出/草稿/重置，只留两个按钮 */
+.works-wrap { position: relative; flex: none; }
+.works-menu { position: absolute; top: calc(100% + 8px); right: 0; min-width: 176px; display: flex; flex-direction: column; gap: 2px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: #161513f7; box-shadow: 0 18px 50px #000c; backdrop-filter: blur(6px); z-index: 20; }
+.works-menu[hidden] { display: none; }
+.works-menu button { display: block; width: 100%; height: 38px; padding: 0 12px; border: 0; border-radius: 8px; background: none; color: var(--ink); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.works-menu button:hover { background: #ffffff1a; }
+
+/* 草稿会话状态条：顶部工具栏下方，提示正在编辑草稿 + 保存回草稿/退出 */
+.session-bar { position: fixed; top: max(60px, calc(env(safe-area-inset-top) + 52px)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 6px 8px 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: #161513f2; box-shadow: 0 10px 30px #0006; backdrop-filter: blur(6px); z-index: 6; }
+.session-bar[hidden] { display: none; }
+.session-bar .session-name { color: var(--ink); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-bar button { flex: none; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: #ffffff14; color: var(--ink); font: inherit; font-size: 13px; cursor: pointer; }
+.session-bar button:hover { background: #ffffff26; }
+.session-bar .session-save { background: #e8e3d8; color: #22211f; font-weight: 600; }
+.session-bar .session-save:hover { background: #fff; }
+@media (max-width: 560px) { .session-bar { font-size: 12px; } .session-bar button { height: 28px; padding: 0 10px; font-size: 12px; } }
+
+/* 草稿箱面板 */
+.drafts-box { width: min(520px, 100%); max-height: min(76vh, 640px); display: flex; flex-direction: column; }
+.drafts-title { display: flex; flex-direction: column; gap: 3px; }
+.draft-savebtn { width: 100%; height: 40px; margin-bottom: 12px; border: 1px dashed var(--line); border-radius: 10px; background: #ffffff0a; color: var(--ink); font: inherit; font-size: 14px; cursor: pointer; }
+.draft-savebtn:hover { background: #ffffff14; }
+.draft-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+.draft-empty { padding: 22px 8px; color: var(--dim); font-size: 13px; text-align: center; }
+.draft-storage { flex: none; margin: 4px 2px 8px; color: var(--dim); font-size: 11px; }
+
+/* 存储不可用警告条：顶部居中，红色系，z-index 高于一切 */
+.storage-warn { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 3px; width: max-content; max-width: calc(100% - 24px); padding: 10px 34px 10px 14px; border: 1px solid #a33; border-radius: 12px; background: #2a1414f2; box-shadow: 0 10px 34px #000a; z-index: 40; }
+.storage-warn[hidden] { display: none; }
+.storage-warn strong { color: #ffd9d9; font-size: 14px; }
+.storage-warn span { color: #f0c8c8; font-size: 12px; line-height: 1.5; }
+.storage-warn button { position: absolute; top: 6px; right: 8px; width: 26px; height: 26px; border: 0; border-radius: 50%; background: none; color: #f0c8c8; font-size: 17px; cursor: pointer; }
+.draft-item { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: #ffffff08; }
+.draft-item .draft-thumb { flex: none; width: 52px; height: 52px; border-radius: 8px; object-fit: cover; background: #ffffff10; }
+.draft-item .draft-meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.draft-item .draft-name { color: var(--ink); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.draft-item .draft-sub { color: var(--dim); font-size: 12px; }
+.draft-item .draft-acts { flex: none; display: flex; gap: 6px; }
+.draft-item .draft-acts button { height: 30px; padding: 0 11px; border: 0; border-radius: 999px; background: #ffffff14; color: var(--ink); font: inherit; font-size: 13px; cursor: pointer; }
+.draft-item .draft-acts button:hover { background: #ffffff26; }
+.draft-item .draft-acts .draft-del:hover { background: #7a2f2f; color: #fff; }
+@media (max-width: 560px) {
+  .draft-item { flex-wrap: wrap; }
+  .draft-item .draft-acts { width: 100%; justify-content: flex-end; }
+  .draft-item .draft-acts button { flex: 1; }
+}
+
 /* 操作提示：独立浮在屏幕底部居中（原先塞在顶栏里，挤且容易被误当成按钮） */
 .hint { position: fixed; left: 50%; bottom: max(14px, env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 4; max-width: calc(100% - 24px); padding: 7px 14px; border: 1px solid var(--line); border-radius: 999px; background: #161513d9; box-shadow: 0 8px 24px #0004; backdrop-filter: blur(6px); color: var(--dim); font-size: 12px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .hint[hidden] { display: none; }
@@ -65,41 +112,103 @@ body.has-caption .hint { bottom: max(70px, calc(env(safe-area-inset-bottom) + 70
 /* 照片编辑器：裁剪 + 白色相框 */
 .editor { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 16px; background: #000b; backdrop-filter: blur(4px); }
 .editor[hidden] { display: none; }
-.ed-panel { display: flex; flex-direction: column; gap: 12px; width: min(880px, 100%); max-height: 100%; overflow: auto; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: #161513f5; box-shadow: 0 24px 70px #000c; }
+.ed-panel { box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; width: min(880px, 100%); height: min(760px, 100%); max-height: 100%; overflow: hidden; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: #161513f5; box-shadow: 0 24px 70px #000c; }
+/* 窄窗口下背面画布会紧贴标题行（实测 by≈19px）。若标题行/模式切换行仍可滚动，
+   在其上拖动会触发浏览器的「拖动即滚动/回弹」语义 → 整页重载、编辑器内容全丢。
+   这里显式禁止这两行的触摸手势，拖动只发生在画布上。
+   overscroll-behavior: contain 同样关键——禁止把手势传给祖先/触发回弹。 */
+.ed-head, .ed-mode { touch-action: none; overscroll-behavior: contain; }
+/* 背面创作时画布要吃掉全部手势：面板本身不能滚。
+   窄窗口下画布 top≈19px，手指常落在面板的空白/标题区；
+   若面板可滚，拖动就会被判为「滚动页面」→ 橡皮筋回弹 → 整页重载、编辑内容全丢
+   （实测 test-touch 在 1000x760 稳定复现）。这里直接禁止背面模式的滚动。 */
+.ed-panel.ed-full { overscroll-behavior: contain; overflow: hidden; touch-action: none; }
+.ed-panel.ed-full .ed-head, .ed-panel.ed-full .ed-mode { touch-action: none; }
 /* 背面模式：整屏不滚动，画布吃掉全部剩余空间；面板尽量铺满窗口（两侧留白是浪费） */
 .ed-panel.ed-full { width: 100%; max-width: none; height: 100%; overflow: hidden; }
 .ed-panel.ed-full .ed-body { flex: 1; min-width: 0; min-height: 0; flex-wrap: nowrap; }
 .ed-panel.ed-full .ed-backwrap { min-width: 0; }
-.ed-head { font-weight: 600; }
-.ed-head span { margin-left: 10px; color: var(--dim); font-size: 12px; font-weight: 400; }
-.ed-body { display: flex; flex-wrap: wrap; gap: 14px; }
-.ed-left { flex: 1 1 380px; min-width: 300px; }
-.ed-right { flex: 0 1 264px; display: flex; flex-direction: column; gap: 10px; }
+.ed-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; font-weight: 600; }
+.ed-head .ed-sub { color: var(--dim); font-size: 12px; font-weight: 400; }
+/* 标题行右端的完成/取消：不占独立一行，右列不会被挤成第三列 */
+.ed-headrow { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; width: 100%; }
+.ed-headbtns { margin-left: auto; display: flex; gap: 8px; flex: none; }
+.ed-headbtns button { height: 32px; padding: 0 16px; border: 0; border-radius: 999px; background: #ffffff14; color: var(--ink); font: inherit; cursor: pointer; transition: background .15s; }
+.ed-headbtns button:hover { background: #ffffff26; }
+.ed-headbtns #edOk { background: #e8e3d8; color: #22211f; font-weight: 600; }
+.ed-headbtns #edOk:hover { background: #fff; }
+/* 正文区吃掉标题行以下的全部高度：面板高度固定，不再随照片比例变化 */
+.ed-body { display: flex; flex-wrap: wrap; gap: 14px; flex: 1; min-height: 0; }
+/* ⚠️ 两列的高度必须**硬绑定到 .ed-body**，光靠 align-self:stretch是不够的。
+   stretch 只在父容器高度确定时生效；一旦某列的内容（细长预览画布可到 520px 高）
+   把它撑开，两列会一起长高、把面板顶出可视区（实测 634→792px，scrollHeight 896>756）。
+   `height:100%` 也不能用：窄屏上下分区时它会让左列吃掉全部高度、把右列挤出可视区。
+   解法：用 100%（百分比只在父高度确定时解析，stretch 场景下父高就是确定的）
+   配合 min-height:0 与内部滚动 —— 见 v104 回归测试 tools/test-thin-crop.js。 */
+.ed-left { flex: 1 1 380px; min-width: 300px; align-self: stretch; height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
+.ed-right { flex: 0 0 296px; align-self: stretch; height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; overscroll-behavior: contain; }
 /* 背面模式：右侧工具栏固定宽、不整体滚动；只有文本属性区内部可滚动，抓手等工具永不被挤出 */
 .ed-panel.ed-full .ed-backtools { flex: 0 0 214px; max-width: 214px; min-height: 0; overflow: hidden; }
 .ed-panel.ed-full .ed-backtools > * { flex: none; }
 .ed-panel.ed-full #edBackTools, .ed-panel.ed-full #edSwatches, .ed-panel.ed-full #edSizeRow { flex: none; }
-.ed-stage { position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; min-height: 220px; max-height: 56vh; border: 1px dashed var(--line); border-radius: 8px; background: #0d0c0b; touch-action: none; }
-#edImg { display: block; max-width: 100%; max-height: 56vh; user-select: none; -webkit-user-drag: none; }
+/* 裁剪台：高度跟随图片（横图不浪费空间），但有 200px～52vh 的上下限，
+   面板高度固定不变 → 切横/竖屏时整个界面纹丝不动 */
+.ed-stage { position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; flex: 0 1 auto; min-height: 200px; max-height: 52vh; border: 1px dashed var(--line); border-radius: 8px; background: #0d0c0b; touch-action: none; }
+#edImg { display: block; max-width: 100%; max-height: 52vh; width: auto; height: auto; user-select: none; -webkit-user-drag: none; }
+#edRatios { flex: none; }
 .ed-crop { position: absolute; box-shadow: 0 0 0 9999px #000a; outline: 1px solid #ffffffcc; cursor: move; }
+/* ⚠️ 把手偏移**不能是负值**。早先是 `-7px`：15px 的方块以框边为圆心向外探出 7px，
+   而 .ed-stage 有 overflow:hidden → 裁剪框贴到舞台边缘时（crop.top 最小到 35px），
+   上下两排把手各被切掉 5~8px，只剩 7px 可点，拖到边缘"抓不住"
+   （实测 stage.scrollHeight 334 → 342，底部 se/s/sw 底边 342.8 >舞台 335.8）。
+   改为 0：把手完整落在框内，永远不会被裁切；再由 clampCrop 留出 HANDLE_PAD 余量，
+   保证"框贴边时把手仍有一半在图片内"，视觉与手感都正常。 */
 .ed-crop span { position: absolute; width: 13px; height: 13px; background: #fff; border: 1px solid #0007; border-radius: 2px; }
-.ed-crop [data-h="nw"] { left: -7px; top: -7px; cursor: nwse-resize; }
-.ed-crop [data-h="ne"] { right: -7px; top: -7px; cursor: nesw-resize; }
-.ed-crop [data-h="sw"] { left: -7px; bottom: -7px; cursor: nesw-resize; }
-.ed-crop [data-h="se"] { right: -7px; bottom: -7px; cursor: nwse-resize; }
-.ed-crop [data-h="n"] { left: calc(50% - 6px); top: -7px; cursor: ns-resize; }
-.ed-crop [data-h="s"] { left: calc(50% - 6px); bottom: -7px; cursor: ns-resize; }
-.ed-crop [data-h="w"] { left: -7px; top: calc(50% - 6px); cursor: ew-resize; }
-.ed-crop [data-h="e"] { right: -7px; top: calc(50% - 6px); cursor: ew-resize; }
+.ed-crop [data-h="nw"] { left: 0; top: 0; cursor: nwse-resize; }
+.ed-crop [data-h="ne"] { right: 0; top: 0; cursor: nesw-resize; }
+.ed-crop [data-h="sw"] { left: 0; bottom: 0; cursor: nesw-resize; }
+.ed-crop [data-h="se"] { right: 0; bottom: 0; cursor: nwse-resize; }
+.ed-crop [data-h="n"] { left: calc(50% - 6px); top: 0; cursor: ns-resize; }
+.ed-crop [data-h="s"] { left: calc(50% - 6px); bottom: 0; cursor: ns-resize; }
+.ed-crop [data-h="w"] { left: 0; top: calc(50% - 6px); cursor: ew-resize; }
+.ed-crop [data-h="e"] { right: 0; top: calc(50% - 6px); cursor: ew-resize; }
 .ed-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .ed-row[hidden] { display: none; }
 .ed-slider[hidden] { display: none; }
 #edFrames { margin-top: 0; }
+/* DIY 相纸：导入区 + 已保存模板 */
+.ed-diybar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ed-diy-add { display: inline-flex; align-items: center; gap: 5px; height: 34px; padding: 0 14px; border: 1px dashed #f2ede466; border-radius: 8px; background: #ffffff0d; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; flex: none; }
+.ed-diy-add:hover { background: #ffffff1c; border-style: solid; }
+.ed-diy-plus { font-size: 16px; line-height: 1; }
+.ed-diy-saved { flex: 1; min-width: 0; }
+.ed-diy-tag { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c9e8d4; font-size: 11px; }
+.ed-diy-tag.ed-diy-none { color: #f2ede499; }
+.ed-papers.diygrid { display: flex; }
+.ed-papers.diygrid .paper-chip { width: 46px; height: 56px; }
+.ed-papers.diygrid .paper-chip canvas { width: 100%; height: 100%; border-radius: 4px; object-fit: cover; }
+/* DIY 相纸：预览上直接拖动/滚轮调整照片 */
+.ed-nudge button { flex: 1; min-width: 0; padding: 0 6px; }
+.ed-nudge-tip { margin-left: auto; align-self: center; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+#edPaperFitRow { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #ffffff08; }
+#edPaperFitRow[hidden] { display: none; }
+#edPaperFitRow .ed-tip b { color: var(--ink); font-weight: 600; }
+/* 自制相纸时预览区变成可拖动的画布 */
+.ed-prevwrap.ed-pan { cursor: grab; touch-action: none; }
+.ed-prevwrap.ed-panning { cursor: grabbing; }
+.ed-prevhint { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 4px 10px; border-radius: 999px; background: #161513d9; color: var(--dim); font-size: 11px; white-space: nowrap; pointer-events: none; }
+.ed-prevhint[hidden] { display: none; }
 .ed-row button { height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; transition: background .15s; }
 .ed-row button:hover { background: #ffffff14; }
 .ed-row button.on { border-color: #f2ede499; background: #f2ede426; }
-.ed-prevwrap { display: flex; align-items: center; justify-content: center; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0d0c0b; }
-#edPrev { max-width: 100%; max-height: 34vh; background: #f4f1ea; box-shadow: 0 4px 16px #0007; }
+/* 预览区吃掉右列剩余高度：预览画布随比例缩放但**不改变右列高度**，
+   所以横屏/竖屏切换时整个面板纹丝不动。
+   max-height 用「面板高度的一半」而非 vh：iPad 竖屏那种高窗口下，
+   预览不会吃掉大半屏把「相框」挤出首屏。 */
+.ed-prevwrap { position: relative; display: flex; align-items: center; justify-content: center; flex: 1 1 auto; min-height: 130px; max-height: 54%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0d0c0b; overflow: hidden; }
+#edPrev { max-width: 100%; max-height: 100%; background: #f4f1ea; box-shadow: 0 4px 16px #0007; }
+/* 右列里除预览外的控件都不参与压缩 */
+.ed-right > .ed-label, .ed-right > .ed-row, .ed-right > .ed-slider, .ed-right > .ed-papers, .ed-right > .ed-diyrow { flex: none; }
 .ed-slider { display: flex; align-items: center; gap: 8px; color: var(--dim); }
 .ed-slider input { flex: 1; accent-color: #e8e3d8; }
 .ed-label { margin-top: 2px; color: var(--dim); font-size: 12px; letter-spacing: .08em; }
@@ -110,6 +219,10 @@ body.has-caption .hint { bottom: max(70px, calc(env(safe-area-inset-bottom) + 70
 .paper-chip.on { border-color: #f2ede4; box-shadow: 0 0 0 1px #f2ede4aa; }
 .paper-chip.solid { width: 30px; height: 30px; border-radius: 999px; }
 .paper-chip.solid.on { box-shadow: 0 0 0 2px #f2ede4cc; }
+/* 调色球（纯色第二行末尾）：与背面画笔的自定义颜色球同款 */
+.paper-chip.ed-picker { position: relative; background: conic-gradient(red, #ff0, #0f0, #0ff, #00f, #f0f, red); }
+/* 自制相纸的上传位：虚线框 + ＋号；有图后显示缩略图 */
+.paper-chip.upload.empty { border-style: dashed; color: var(--dim); font-size: 18px; }
 .ed-papers.solidgrid { display: grid; grid-template-columns: repeat(6, 30px); gap: 6px; }
 .ed-papers.doodlegrid { display: grid; grid-template-columns: repeat(6, 36px); gap: 5px; }
 .ed-papers.doodlegrid .paper-chip { width: 36px; height: 44px; }
@@ -117,14 +230,6 @@ body.has-caption .hint { bottom: max(70px, calc(env(safe-area-inset-bottom) + 70
 .ed-sliders[hidden] { display: none; }
 .ed-sliders .ed-slider input { -webkit-appearance: none; appearance: none; height: 14px; border-radius: 999px; border: 1px solid var(--line); padding: 0; }
 .ed-sliders .ed-slider input::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 20px; border-radius: 4px; background: #fff; border: 1px solid #0006; box-shadow: 0 1px 4px #0008; margin-top: -3px; }
-#edHue::-webkit-slider-runnable-track { height: 14px; border-radius: 999px; background: linear-gradient(to right, #e60012, #fdb913, #ffe94e, #6abf4b, #56b9e9, #27447b, #7d5fc4, #d062c4); }
-#edSat { --satgrad: linear-gradient(to right, #c9c9c9, #e60012); }
-#edSat::-webkit-slider-runnable-track { height: 14px; border-radius: 999px; background: var(--satgrad); }
-.ed-foot { display: flex; justify-content: flex-end; gap: 8px; }
-.ed-foot button { height: 34px; padding: 0 18px; border: 0; border-radius: 999px; background: #ffffff14; color: var(--ink); font: inherit; cursor: pointer; transition: background .15s; }
-.ed-foot button:hover { background: #ffffff26; }
-.ed-foot #edOk { background: #e8e3d8; color: #22211f; font-weight: 600; }
-.ed-foot #edOk:hover { background: #fff; }
 
 /* 正面/背面模式切换 */
 .ed-mode { margin-top: 2px; }
@@ -181,7 +286,10 @@ canvas { -webkit-user-drag: none; }
 /* 「？怎么平移」按钮与引导条：说明浏览器鼠标手势可能占用右键 */
 .ed-helpbtn { height: 26px; min-width: 0 !important; padding: 0 10px !important; border-radius: 999px !important; color: #f2ede4aa !important; font-size: 12px; }
 .ed-helpbtn:hover { color: var(--ink) !important; }
-.ed-pantip { display: flex; flex-direction: column; gap: 4px; margin: 0 8px 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #1d1b18; color: #d8d2c6; font-size: 12px; line-height: 1.6; }
+/* 平移引导条：⚠️ 绝不能遮住画布 —— 它是浮层，早先盖在舞台上方时，
+   新用户第一次进背面创作就点不到画布、画不了笔（实测自动化里墨像素=0 就是这么来的）。
+   现在改成**占位式**（不 absolute，参与正常文档流），画布高度自动收缩让位，永远不遮挡。 */
+.ed-pantip { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #1d1b18; color: #d8d2c6; font-size: 12px; line-height: 1.6; flex: 0 0 auto; }
 .ed-pantip[hidden] { display: none; }
 .ed-pantip b { color: var(--ink); font-size: 13px; }
 .ed-pantip kbd { padding: 1px 5px; border: 1px solid #ffffff2e; border-radius: 4px; background: #ffffff14; color: #fff; font: inherit; font-size: 11px; }
@@ -215,11 +323,13 @@ canvas { -webkit-user-drag: none; }
   .editor { padding: 0; }
   .ed-panel { width: 100%; max-width: 100%; height: 100%; max-height: 100%; border-radius: 0; }
   .ed-body { flex-direction: column; flex-wrap: nowrap; }
-  .ed-left { flex: 0 0 auto; min-width: 0; width: 100%; }
-  .ed-right { flex: 1 1 auto; min-width: 0; width: 100%; overflow-y: auto; }
-  .ed-stage { max-height: 42vh; }
-  .ed-foot { padding: 10px 12px; }
-  .ed-prevwrap #edPrev { max-height: 24vh; }
+  .ed-left { flex: 0 0 auto; min-width: 0; width: 100%; height: auto; align-self: auto; }
+  .ed-right { flex: 1 1 auto; min-width: 0; width: 100%; height: auto; align-self: auto; overflow-y: auto; }
+  /* 上下分区时左列是 auto 高度，裁剪台要自己给一个确定高度（否则 flex:1 会塌成 0） */
+  .ed-stage { flex: none; height: 40vh; }
+  /* 完成/取消已在标题行，压缩尺寸防换行挤压 */
+  .ed-headbtns button { height: 30px; padding: 0 12px; font-size: 12px; }
+  .ed-head .ed-sub { display: none; }   /* 窄屏只留「编辑照片」+ 按钮，副标题让位 */
   .ed-mode { flex-wrap: wrap; }
 
   /* 背面创作模式：画布占上半、工具贴底 */
@@ -229,4 +339,34 @@ canvas { -webkit-user-drag: none; }
   .ed-panel.ed-full .ed-backtools { flex: 0 0 auto; max-width: none; width: 100%; max-height: 46vh; overflow-y: auto; }
   .ed-panel.ed-full .ed-toolgrid { grid-template-columns: repeat(4, 1fr); }
   .ed-panel.ed-full #edTextPanel { max-height: 32vh; }
+
+  /* ===== v109：手机端背面创作 —— 空间还给画布，按钮文字不堆积 =====
+     实测（390×844 截图）：画布只占屏 ~40%，下面工具区反而铺得很开；
+     缩放条按钮被挤成两行（「适应/窗口」「？怎/么平」折行），与缩放提示文字互相堆叠。
+     压缩策略：面板留白/行距收紧 + 隐藏「工具/颜色」小标题 + 按钮降高 + 字号 12px，
+     缩放条禁折行并隐藏长文案（.ed-w 片段与 .ed-zoomhint 只在桌面端显示）。 */
+  .ed-panel { padding: 10px; gap: 8px; }
+  .ed-row { margin-top: 6px; }
+  .ed-mode { margin-top: 0; }
+  .ed-mode button { height: 28px; padding: 0 12px; }
+  /* 所有按钮一律不折行：宁可缩文字也不许「适应/窗口」拆成两行堆积 */
+  .ed-row button, .ed-mode button, .ed-headbtns button, .ed-toolgrid button, .ed-zoombar button { white-space: nowrap; flex: none; }
+
+  .ed-panel.ed-full .ed-backwrap { gap: 6px; }
+  .ed-panel.ed-full .ed-backtools { max-height: 40vh; gap: 5px; }
+  .ed-panel.ed-full .ed-backtools > .ed-label { display: none; }   /* 「工具/颜色」标题让位：色球与按钮本身一目了然 */
+  .ed-panel.ed-full .ed-toolgrid { gap: 4px; }
+  .ed-panel.ed-full .ed-toolgrid button { height: 26px; font-size: 12px; }
+  .ed-panel.ed-full .ed-right { gap: 6px; }
+  .ed-panel.ed-full #edSwatches button { width: 22px; height: 22px; }
+  .ed-panel.ed-full #edSizeRow { font-size: 12px; gap: 6px; }
+  .ed-panel.ed-full #edBackRight > .ed-row { margin-top: 0; }
+  .ed-panel.ed-full #edBackRight #edUndo, .ed-panel.ed-full #edBackRight #edClear { height: 28px; font-size: 12px; }
+
+  .ed-zoombar { flex-wrap: nowrap; }
+  .ed-zoombar #edZoomVal { min-width: 36px; font-size: 11px; }
+  .ed-zoomhint, .ed-w { display: none; }   /* 长提示与「窗口/怎么」片段只在宽屏出现 */
+  /* 手机上点「？平移」唤出的引导条：紧凑版，尽量少吃画布（仍是占位式、绝不遮挡画布） */
+  .ed-panel.ed-full .ed-pantip { margin-top: 4px; padding: 8px 10px; gap: 3px; font-size: 11px; }
+  .ed-panel.ed-full .ed-pantip b { font-size: 12px; }
 }

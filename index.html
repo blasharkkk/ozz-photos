@@ -7,21 +7,53 @@
   <meta name="description" content="照片印在棉纸上，悬成一片云，浮在破碎镜面之上；镜面把流动的光投到天花板。拖动环视，滚轮拉近，点照片飞入聚焦，方向键切换，Esc 退回。">
   <meta name="theme-color" content="#7c7a76">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='5' width='14' height='11' fill='%23e9e5dc'/%3E%3Crect x='14' y='14' width='14' height='11' fill='%23cfc9bd'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=115">
 </head>
 <body>
-  <canvas id="scene" tabindex="0" aria-label="一片悬在破碎镜面上方的纸照片云。拖动环视，滚轮或双指拉近，点照片查看；左右方向键切换，Esc 退回全景。"></canvas>
+  <canvas id="scene" tabindex="0" aria-label="一片悬在破碎镜面上方的纸照片云。拖动环视，滚轮或双指拉近；远距点照片飞入聚焦，已放大居中的照片再点一下翻面看背面；左右方向键切换，Esc 退回全景。"></canvas>
   <div id="toast" role="status" hidden></div>
 
-  <!-- 顶部工具栏：添加你自己的照片 / 打包分享 / 重置。作品名不再占顶栏，改为导出时才问 -->
+  <!-- 存储不可用警告：无痕模式 / 以本地文件(file://)直接打开 / 隐私设置禁用 IndexedDB 时出现 -->
+  <div id="storageWarn" class="storage-warn" hidden>
+    <strong>当前浏览器无法保存作品</strong>
+    <span id="storageWarnMsg">你添加的照片在刷新或关闭页面后会丢失。请换用普通窗口（非无痕/InPrivate）打开，或确认地址是 https 公网链接而非本地文件。</span>
+    <button id="storageWarnClose" type="button" aria-label="关闭提示">×</button>
+  </div>
+
+  <!-- 顶部工具栏：添加你自己的照片 / 作品菜单。作品名不再占顶栏，改为导出时才问。
+       「作品」菜单收拢导出分享版 / 我的草稿 / 重置，顶栏只留两个按钮，手机端不挤 -->
   <div id="toolbar" class="toolbar">
     <button id="add" type="button" title="添加一张你自己的照片到云里">＋ 添加照片</button>
-    <button id="exportBtn" type="button" title="把当前作品打包成一个可离线打开、只能查看不能编辑的 HTML 文件">⬇ 导出分享版</button>
-    <button id="reset" type="button" title="清除你自己上传/替换的照片，恢复示例">↺ 重置</button>
+    <div class="works-wrap">
+      <button id="worksBtn" type="button" title="导出 / 草稿箱 / 重置" aria-haspopup="menu" aria-expanded="false">☰ 作品 ▾</button>
+      <div id="worksMenu" class="works-menu" role="menu" hidden>
+        <button id="exportBtn" type="button" role="menuitem" title="把当前作品打包成一个可离线打开、只能查看不能编辑的 HTML 文件">⬇ 导出分享版</button>
+        <button id="draftsBtn" type="button" role="menuitem" title="保存草稿、继续编辑、分享草稿">📁 我的草稿</button>
+        <button id="reset" type="button" role="menuitem" title="清除你自己上传/替换的照片，恢复示例">↺ 重置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 草稿会话状态条：正在编辑某个草稿时出现，提供「保存回草稿 / 退出」 -->
+  <div id="sessionBar" class="session-bar" hidden>
+    <span id="sessionName" class="session-name">正在编辑草稿</span>
+    <button id="sessionSave" type="button" class="session-save">保存回草稿</button>
+    <button id="sessionExit" type="button">退出到我的作品</button>
+  </div>
+
+  <!-- 草稿箱：存草稿 / 继续编辑 / 分享 / 删除 -->
+  <div id="draftsDlg" class="name-dlg drafts-dlg" hidden>
+    <div class="name-box drafts-box" role="dialog" aria-modal="true" aria-label="我的草稿">
+      <p class="drafts-title">我的草稿<small>草稿存在本机浏览器，随时回来继续改；分享出去对方依旧只能看</small></p>
+      <button id="draftSave" type="button" class="draft-savebtn">＋ 把当前作品存为草稿</button>
+      <div id="draftList" class="draft-list"></div>
+      <div id="draftStorage" class="draft-storage"></div>
+      <div class="name-act"><button id="draftsClose" type="button" class="primary">关闭</button></div>
+    </div>
   </div>
 
   <!-- 操作提示：放屏幕底部居中，不挤占顶部工具栏 -->
-  <div id="hint" class="hint">拖动环视 · 滚轮缩放 · 点照片查看</div>
+  <div id="hint" class="hint">拖动环视 · 滚轮缩放 · 远距点照片聚焦 · 居中后再点一下翻面</div>
 
   <!-- 作品命名弹窗：导出分享版时才弹出，问一次即可 -->
   <div id="nameDlg" class="name-dlg" hidden>
@@ -41,7 +73,7 @@
     <p role="status"><strong id="title"></strong><span id="credit"></span><a id="source" target="_blank" rel="noopener">来源 ↗</a></p>
     <button id="replace" type="button" title="用你自己的图替换这张">替换此照片</button>
     <button id="editBtn" type="button" title="重新编辑这张（电脑双击照片；触屏双击或长按）">编辑</button>
-    <button id="flipBtn" type="button" title="翻转查看背面（电脑单击照片）" hidden>⇄ 背面</button>
+    <button id="flipBtn" type="button" title="翻转查看照片背面（已居中的照片，再点一下也能翻面）" hidden>⇄ 背面</button>
     <button id="next" type="button" aria-label="下一张">›</button>
     <button id="close" type="button" aria-label="退回全景">×</button>
   </div>
@@ -49,7 +81,16 @@
   <!-- 照片编辑器：上传后先裁剪、选相框，确认后再进云 -->
   <div id="editor" class="editor" hidden>
     <div class="ed-panel" role="dialog" aria-modal="true" aria-label="编辑照片：裁剪并选择相框">
-      <div class="ed-head">编辑照片<span>① 先定正面 · ② 再创作背面</span></div>
+      <!-- 完成/取消固定在标题行右端：不占独立一行，右列不会被挤成第三列（v103 修复） -->
+      <div class="ed-head">
+        <div class="ed-headrow">
+          <b>编辑照片</b><span class="ed-sub">① 先定正面 · ② 再创作背面</span>
+          <div class="ed-headbtns">
+            <button id="edCancel" type="button">取消</button>
+            <button id="edOk" type="button">完成，放进云里</button>
+          </div>
+        </div>
+      </div>
       <div class="ed-row ed-mode" id="edMode">
         <button data-mode="front" class="on" type="button">① 正面</button>
         <button data-mode="back" type="button">② 背面创作</button>
@@ -89,8 +130,8 @@
             <button id="edZoomOut" type="button" title="缩小">−</button>
             <span id="edZoomVal">100%</span>
             <button id="edZoomIn" type="button" title="放大">+</button>
-            <button id="edZoomFit" type="button">适应窗口</button>
-            <button id="edPanHelp" type="button" class="ed-helpbtn" title="画布怎么移动？右键可能被浏览器手势占用，这里有替代方案">？怎么平移</button>
+            <button id="edZoomFit" type="button">适应<span class="ed-w"> 窗口</span></button>
+            <button id="edPanHelp" type="button" class="ed-helpbtn" title="画布怎么移动？右键可能被浏览器手势占用，这里有替代方案">？<span class="ed-w">怎么</span>平移</button>
             <span class="ed-zoomhint">滚轮 / 双指缩放 · 抓手或双指平移</span>
           </div>
           <!-- 平移方式引导：说明浏览器鼠标手势会占用右键，并给出替代方案 -->
@@ -104,18 +145,29 @@
         </div>
         <!-- 右：正面相纸 -->
         <div class="ed-right" id="edFrontRight">
-          <div class="ed-prevwrap"><canvas id="edPrev"></canvas></div>
+          <div class="ed-prevwrap" id="edPrevWrap">
+            <canvas id="edPrev"></canvas>
+            <p class="ed-prevhint" id="edPrevHint" hidden>直接拖动照片移动位置 · 滚轮缩放</p>
+          </div>
           <div class="ed-label">相纸</div>
           <div class="ed-row" id="edSeries">
-            <button data-s="classic" class="on" type="button">经典</button>
-            <button data-s="solid" type="button">纯色</button>
+            <button data-s="solid" class="on" type="button">纯色</button>
             <button data-s="doodle" type="button">涂鸦</button>
             <button data-s="laser" type="button">镭射</button>
+            <button data-s="custom" type="button">DIY</button>
           </div>
           <div class="ed-papers" id="edPapers"></div>
-          <div id="edSliders" class="ed-sliders" hidden>
-            <label class="ed-slider">色相<input id="edHue" type="range" min="0" max="360" value="42"></label>
-            <label class="ed-slider">饱和<input id="edSat" type="range" min="0" max="100" value="30"></label>
+          <!-- DIY 相纸：上传已扣好镂空的底图（PNG 透明处即照片窗口），相纸叠在照片之上 -->
+          <div id="edPaperFitRow" class="ed-diyrow" hidden>
+            <div class="ed-row">
+              <button id="edDiyImport" type="button">＋ 导入相纸</button>
+              <span class="ed-diyhint" id="edDiySaved">未导入</span>
+            </div>
+            <div class="ed-row">
+              <button id="edPaperCenter" type="button">照片复位</button>
+              <span class="ed-diyhint" id="edPaperFitVal">100%</span>
+            </div>
+            <p class="ed-tip">底图需是<b>已扣好镂空的 PNG</b>：透明处透出照片，不透明处即相纸花纹。</p>
           </div>
           <div class="ed-label">相框</div>
           <div class="ed-row" id="edFrames">
@@ -128,7 +180,7 @@
             <button data-t="equal" type="button" title="四边 7%">等边</button>
             <button data-t="wide" class="on" type="button" title="四边 6.5% · 下宽 14%">宽边</button>
           </div>
-          <label class="ed-slider" id="edWidthRow">相框宽度<input id="edWidth" type="range" min="3" max="15" value="7"><span id="edWidthVal">7%</span></label>
+          <label class="ed-slider" id="edWidthRow">相框下边宽度<input id="edWidth" type="range" min="3" max="30" value="15"><span id="edWidthVal">15%</span></label>
         </div>
         <!-- 右：背面工具（竖排固定，不随画布滚动） -->
         <div class="ed-right ed-backtools" id="edBackRight" hidden>
@@ -178,10 +230,6 @@
           <p class="ed-tip">拖框内移动 · 右下角手柄自由缩放 · 顶部圆点旋转（Shift 吸附 15°）· 双击改字</p>
         </div>
       </div>
-      <div class="ed-foot">
-        <button id="edCancel" type="button">取消</button>
-        <button id="edOk" type="button">完成，放进云里</button>
-      </div>
     </div>
   </div>
 
@@ -193,7 +241,9 @@
 
   <!-- 隐藏的文件选择器，由“添加照片 / 替换此照片”触发 -->
   <input id="file" type="file" accept="image/*" hidden>
+  <!-- DIY 相纸底图选择器（只收 JPG / PNG，由「＋ 导入相纸」触发） -->
+  <input id="edPaperFile" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden>
 
-  <script type="module" src="main.js?v=42"></script>
+  <script type="module" src="main.js?v=115"></script>
 </body>
 </html>

@@ -4,7 +4,12 @@
 const LAYER = 256;            // 每张照片的纹理尺寸；选中时会加载原图
 const MAX_LAYERS = 64;        // 纹理数组预留层数（含你后续添加的照片）
 const MAX_SHEETS = 256;       // 纸片实例上限
-const FLOATS_PER_SHEET = 16;  // 每个实例：中心xyz+yaw、宽高相位层、裁切uv、交互动力学(位移xyz+偏航)
+const FLOATS_PER_SHEET = 24;  // 每实例24float：0-3中心xyz+yaw｜4-7宽高相位层｜8-11裁切uv｜12-15动力学(位移xyz+偏航)｜16-19镭射强度+种子+左右窗口｜20-23上下窗口+背面比例+预留
+// 背面纸片的宽高比（backW/backH）。纹理数组是正方形 LAYER×LAYER，而背面图是长方形——
+// 上传时按此比例居中 contain，着色器按同一比例采样，两边对齐图案才不变形。
+// ⚠️ 必须声明在 writeSheet 之前：模块顶层会立刻调用 writeSheet 建首批纸片，
+// 用 let 声明在后面会触发 TDZ（Cannot access before initialization）直接白屏。
+let backAspect = 1;
 const [RX, RH, RZ] = [8, 5.4, 8]; // 房间半宽、高、半深（米）
 const FOV = 45 * Math.PI / 180;
 const HOME = { yaw: .3, pitch: .1, dist: 10.5, x: 0, y: 2.6, z: 0 };
@@ -98,28 +103,40 @@ layout(location = 1) in vec4 aA;    // 中心, yaw
 layout(location = 2) in vec4 aB;    // 宽, 高, 相位, 层
 layout(location = 3) in vec4 aCrop; // 纹理空间裁切
 layout(location = 4) in vec4 aDyn;  // 交互动力学：位移 xyz + 偏航
+layout(location = 5) in vec4 aPaper; // 镭射强度, 种子, 照片窗口左, 照片窗口右
+layout(location = 6) in vec4 aPaper2;// 照片窗口上, 照片窗口下, 背面贴图宽高比, 预留
 ${SWAY}
 uniform mat4 uVP;
 out vec2 vUV; out vec3 vN, vP; flat out vec4 vCrop; flat out vec3 vMeta; flat out vec2 vId;
+flat out vec4 vPaper; flat out vec4 vPaper2;
 void main() {
   vec3 c; float yaw; sway(aA, aB, c, yaw);
   c += aDyn.xyz; yaw += aDyn.w;
   vec3 r = vec3(cos(yaw), 0, -sin(yaw)), n = vec3(sin(yaw), 0, cos(yaw));
   vec2 q = aCorner * aB.xy;
-  float curl = (fract((aB.z >= 1000.0 ? aB.z - 1000.0 : aB.z) * 7.31) - .5) * .5; // 纸微微卷曲
-  vP = c + r * q.x + vec3(0, q.y, 0) + n * curl * (q.x * q.x - aB.x * aB.x * .25);
-  vN = n - r * 2. * curl * q.x;
+  // 纸微微卷曲：沿法线方向做一个抛物面凸起，中间鼓、边缘收。
+  // ⚠️ 归一化基准必须用**半高的平方**（aB.y*aB.y），早先写成了 aB.x*aB.x（半宽的平方）——
+  //   对非正方形纸片（照片按比例生成，w≠h 是常态）来说基准完全错，
+  //   曲率随宽度线性放大，纸片正对镜头时就表现为「整张纸扭曲/变成梯形」，
+  //   用户实测「刚加的照片整个变形，翻转一下才正常」。
+  //   另：卷曲幅度必须与纸片尺寸成比例，否则小纸片会被卷得看不见、大纸片纹丝不动。
+  float curl = (fract((aB.z >= 1000.0 ? aB.z - 1000.0 : aB.z) * 7.31) - .5);
+  curl *= min(aB.y * aB.y, .3) * .55;   // 幅度 ∝ 半高²，视觉弯曲才一致
+  vP = c + r * q.x + vec3(0, q.y, 0) + n * curl * (q.x * q.x / (aB.x * aB.x) - .25);
+  vN = normalize(n - r * curl * 2. * q.x / (aB.x * aB.x));
   vUV = vec2(aCorner.x + .5, .5 - aCorner.y);
   // vId = (实例序号, 是否背面朝外)；后者决定背面 UV 要不要镜像：
   // 背面朝外 → 没转过 → 不镜像；翻转到背面 → 转了 180° → 需镜像才正读。
   // backOut 借 phase 高位传递：aB.z ≥ 1000 表示背面朝外，取景相位 = aB.z - 1000
   bool backOut = aB.z >= 1000.0;
   vCrop = aCrop; vMeta = vec3(aB.w, aB.xy); vId = vec2(float(gl_InstanceID), backOut ? 1.0 : 0.0);
+  vPaper = aPaper; vPaper2 = aPaper2;
   gl_Position = uVP * vec4(vP, 1);
 }`, `
 ${NOISE}
-uniform mediump sampler2DArray uPhotos; uniform mediump sampler2DArray uBacks; uniform sampler2D uFull; uniform sampler2D uBackFull; uniform int uSel, uHover; uniform bool uFullOn, uBackFullOn; uniform vec3 uEye, uFocus;
+uniform mediump sampler2DArray uPhotos; uniform mediump sampler2DArray uBacks; uniform sampler2D uFull; uniform sampler2D uBackFull; uniform int uSel, uHover; uniform bool uFullOn, uBackFullOn; uniform vec3 uEye, uFocus; uniform float uTime;
 in vec2 vUV; in vec3 vN, vP; flat in vec4 vCrop; flat in vec3 vMeta; flat in vec2 vId;
+flat in vec4 vPaper; flat in vec4 vPaper2;
 out vec4 o;
 void main() {
   // 选中照片与眼睛之间的纸片柔和淡出：墨色先隐入空纸，贴近视线才碎成窄窄的纸屑
@@ -141,18 +158,113 @@ void main() {
   // 聚焦且翻到背面时用高清背面纹理（否则 256 层会看不清手写字）。
   // 背面 UV：背面朝外（vId.y=1）时纸片没转过，直接用原 UV；
   // 翻转 180° 看过背面时几何转了，需水平镜像才正读。
-  // 背面始终用整幅 vUV（不走正面的随机取景 cuv），否则背面内容会被裁掉一部分
+  // 背面始终用整幅 vUV（不走正面的随机取景 cuv），否则背面内容会被裁掉一部分。
+  // 背面贴图上传时按 backAspect 居中 contain 进方形纹理（长方形图不变形），
+  // 这里用同一套映射把纹理里那一块取出来，两边比例一致图案才对得上。
   vec2 buv = vId.y > .5 ? vec2(1. - vUV.x, vUV.y) : vUV;
-  vec3 photoB = (vId.x == float(uSel) && uBackFullOn && !front) ? texture(uBackFull, buv).rgb : texture(uBacks, vec3(buv, vMeta.x)).rgb;
+  // 背面贴图上传时按「等比缩放 + 居中」放进方形纹理（loadBackLayer 的 contain），
+  // 所以采样必须**从纹理里把那块区域取出来**：vUV ∈[0,1] 线性映射到
+  //   ar ≥ 1：x 满幅、y ∈ [(1-1/ar)/2, (1+1/ar)/2]   （上下留白）
+  //   ar < 1：y 满幅、x ∈ [(1-ar)/2, (1+ar)/2]       （左右留白）
+  // ⚠️ 早先写成了**反向映射**（把 UV 从方图投到长方形），
+  //    UV 靠近 0/1 时算出 -0.5 / 1.5 → clamp 后采到 contain 填充的灰边，
+  //    正中间才落在图像上 → 背面看起来「只有中间一行是镭射，上下空白相纸」，
+  //    翻转时改走 uBackFull（无 contain）才"看起来正常" —— 实为两条路径不一致。
+  float vAspect = clamp(vPaper2.z, .2, 5.);   // 背面贴图宽高比
+  if (vAspect > 1.001)      buv.y = (1. - 1. / vAspect) * .5 + buv.y / vAspect;
+  else if (vAspect < .999)  buv.x = (1. - vAspect) * .5 + buv.x * vAspect;
+  vec3 photoB = (vId.x == float(uSel) && uBackFullOn && !front)
+      // uBackFull 直接用原图（未经 contain 缩放），所以不能用 vAspect 映射
+      ? texture(uBackFull, vId.y > .5 ? vec2(1. - vUV.x, vUV.y) : vUV).rgb
+      : texture(uBacks, vec3(clamp(buv, 0., 1.), vMeta.x)).rgb;
   vec3 photo = front ? photoF : photoB;
-  // 棉纸上的颜料：更亮更柔，边缘不均匀地晕开
-  vec3 ink = 1. - (1. - mix(vec3(dot(photo, vec3(.3, .59, .11))), photo, .85)) * .85;
-  if (vId.x == float(uSel)) ink = mix(ink, photo, .7);
+  // 棉纸上的颜料：更亮更柔，边缘不均匀地晕开。
+  // ⚠️ 这个「朝灰度压 85%」是为了模拟颜料渗进棉纸的质感，但**背面整张都是相纸**，
+  // 压灰会把箔面的虹彩差异削到只剩 15% —— 这正是用户看到「正面有流光、背面没有」的原因。
+  // 所以背面（无照片内容、整片是箔面）跳过压灰，保住干涉色。
+  vec3 ink = front ? 1. - (1. - mix(vec3(dot(photo, vec3(.3, .59, .11))), photo, .85)) * .85
+                   : mix(photo, 1. - (1. - photo) * .92, .35);   // 背面：只轻微提亮，不压灰
+  if (vId.x == float(uSel)) ink = mix(ink, photo, front ? .7 : .45);
   vec2 d = (abs(vUV - (a + b) * .5) - (b - a) * .5) * size;
   float inked = smoothstep(.003, -.003, max(d.x, d.y) + (noise(vUV * size * 28.) - .5) * .008);
   inked *= 1. - occ; // 遮挡淡出的柔和段：墨色归于空白棉纸
   vec3 paper = vec3(.95, .935, .9) * (.97 + .03 * noise(vUV * size * 160.));
   vec3 col = paper * mix(vec3(1), ink, inked);
+
+  // ---- 镭射相纸：随视角流动的全息箔 ----
+  // 之前是把渐变烘焙进贴图，所以转动纸片颜色不变——那只是「印上去的花纹」。
+  // 真实镭射膜的彩虹来自薄膜干涉：颜色取决于「视线与纸面夹角」，转动纸片就该换色。
+  //
+  // ⚠️ 上一版用「0.5 + 0.5×cos(相位 + 三通道偏移)」直接生成 RGB，那是**数学上的满饱和色环**，
+  // 必然经过纯品红/纯黄/纯青 → 用户反馈「艳丽得假、不像真镭射」。
+  // 真实镭射的三个关键特征必须还原：
+  //   ① 低饱和粉彩色为主（虹彩是「闪色」不是「涂色」），只在局部泛出饱和色
+  //   ② 底色是金属灰/深色，虹彩是叠加在底上的**光**，不会把底色冲淡
+  //   ③ 细密磨砂颗粒（箔面微结构），近看有微弱的衍射纹
+  if (vPaper.x > .5) {
+    vec3 V = normalize(uEye - vP);
+    float ndv = clamp(dot(n, V), .06, 1.);           // 正对=1，掠射→0
+    float ang = 1. - ndv;                             // 偏离越大，干涉级次越高
+    // 背面 UV 可能被水平镜像（翻到背面看时），用它算条纹才不会被拉花
+    vec2 suv = front ? vUV : buv;
+    // 膜厚沿纸面有微小起伏（真实箔面各点厚度不同），再叠上视角项。
+    // 用较高频率的噪声：低频噪声只会让色带平滑地弯几下，反而显得是「画上去的渐变」；
+    // 高频才像真实箔面那种细碎多变的干涉。
+    float film = noise(suv * vec2(14., 9.5) + vPaper.y * 11.) - .5;      // ±0.5 的厚度扰动
+    float film2 = noise(suv * vec2(31., 23.) - vPaper.y * 7.) - .5;      // 再叠一层更细的
+    float band = dot(suv, vec2(1.15, .78)) * 6.2831 + ang * 2.2 + film * 1.9 + film2 * .7 + vPaper.y * 6.2831;
+
+    // 干涉色：仍用三通道余弦，但相位差只取「窄带」——真实薄膜的干涉级次是不均匀的，
+    // 而且要压掉满饱和。做法：先用单色相 cos 得到虹彩色相，再整体降饱和 + 提亮底。
+    vec3 irid = .5 + .5 * cos(band + vec3(0., 2.094, 4.188));
+    // 降饱和：向其亮度靠拢 ~58%，得到粉彩「闪色」而非涂色
+    float iridLum = dot(irid, vec3(.299, .587, .114));
+    irid = mix(vec3(iridLum), irid, .42);
+    irid = mix(irid, irid * .82 + .18, .5);           // 略提亮，保住箔面的通透感
+
+    // 视角越大彩越明显，但用幂次收紧，避免正对时满屏乱闪。
+    // ⚠️ 另外要压住上限：纸片侧转时 ang 很容易接近 1，若不封顶，
+    //    深底玄黑会被整片虹彩盖住（用户实测「背面满屏彩虹、黑镭射都不黑了」）。
+    //    这里对 amt 做硬上限，并且背面（整张箔面、无照片遮挡）不给额外增益。
+    float angGain = smoothstep(0., .55, ang) * .78;
+    // 高光带：宽而柔的光扫（不是硬边条纹），随时间极慢漂移
+    float sweep = pow(max(0., sin(suv.x * 1.25 - suv.y * .85 + uTime * .28 + vPaper.y * 6.28)), 2.2);
+
+    // 磨砂颗粒：箔面微结构造成的细微闪点。用屏幕像素坐标（不随距离糊掉）
+    float grain = (hash(floor(gl_FragCoord.xy * .5)) - .5) * .05;
+    // 衍射微纹：极细的斜向纹路，近看可见。
+    // ⚠️ 不要用单一频率的正弦（sin(uv*300)）——那会形成极其规整的条纹，
+    //    在深底上看起来就像「生硬的印刷痕迹」（用户实测）。真箔面的干涉是细密多频的，
+    //    所以用两个不可通约的频率叠加 + 噪声扰动 → 无规则的细密微光。
+    float micro = sin(suv.x * 197.0 + suv.y * 131.0 + ang * 33.0)
+                * sin(suv.x * 89.0 - suv.y * 173.0 - ang * 21.0);
+    micro = micro * .5 + .5;
+    micro = (micro - .5) * .022;
+
+    // 正面：只作用在相纸留白（照片窗口之外），照片本身不受影响；
+    // 背面：整张都是相纸，全幅显色。
+    // 窗口四边分别在 vPaper.z(左) / vPaper.w(右) / vPaper2.x(上) / vPaper2.y(下)。
+    float border;
+    if (front) {
+      float inX = step(vPaper.z, vUV.x) * step(vUV.x, 1. - vPaper.w);
+      float inY = step(vPaper2.x, vUV.y) * step(vUV.y, 1. - vPaper2.y);
+      border = 1. - inX * inY;
+    } else border = 1.;
+
+    // 组装：虹彩以「加光」方式叠在原底色上（保留金属底），而不是把底色替换掉。
+    // 强度刻意压低 —— 真镭射是暗底上偶尔泛出的闪色，不是满屏彩虹。
+    // amt 封顶 .55：保证任何角度下底色都还在（黑镭射永远是黑底，只泛出局部彩光）。
+    float back = front ? 0. : 1.;
+    // 底色深度调制：深底（玄黑）上泛出的彩光本来就弱，浅底（银/金）上可以更明显。
+    // vPaper2.w = 该纸底色的相对亮度（0=纯黑, 1=近白）。
+    float baseW = clamp(vPaper2.w, .12, 1.);
+    float depthMul = .38 + baseW * .82;      // 玄黑(≈.12) → .48；银白(≈.85) → 1.08
+    float amt = min(border * (angGain * .5 + sweep * angGain * .3) * depthMul, .55);
+    vec3 foil = col * (1. - amt * .34) + irid * amt * .62 + sweep * irid * amt * .5;
+    foil += (grain + micro) * (.4 + amt);            // 颗粒在有虹彩处更明显（光下的微结构）
+    col = mix(col, foil, clamp(amt * 1.1, 0., .8));
+  }
+
   float lit = (.74 + .2 * abs(dot(n, normalize(vec3(.35, .55, .75)))) + .08 * smoothstep(1.5, 4.6, vP.y)) * (vId.x == float(uHover) ? 1.1 : 1.);
   o = vec4(col * lit, 1);
 }`);
@@ -180,6 +292,15 @@ function program(vs, fs) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, `#version 300 es\nprecision highp float;\n${src}`);
     gl.compileShader(sh);
+    // 编译失败时 link 也会失败，但 getProgramInfoLog 会把错误吞成一句含糊的
+    // 「front is not defined」式误导信息（Chrome 对 GLSL 错误的文案极不可靠）。
+    // 这里把**编译日志原文**打出来，附上出错行，才能真正定位问题。
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh) || '';
+      const lines = src.split('\n');
+      const detail = log.replace(/ERROR: \d+:(\d+)/g, (m, n) => `${m}  « ${(lines[+n - 1] || '').trim()} »`);
+      console.error(`[shader ${type === gl.VERTEX_SHADER ? 'VS' : 'FS'}] 编译失败:\n${detail}`);
+    }
     gl.attachShader(p, sh);
   }
   gl.linkProgram(p);
@@ -202,19 +323,39 @@ if (READONLY) document.documentElement.dataset.readonly = '1';
 const basePhotos = EMBEDDED ? EMBEDDED.photos : (await (await fetch('photos.json')).json()).photos;
 // 应用本地存储里你自己上传/替换的照片（IndexedDB 优先，localStorage 兜底）
 const STORE_KEY = 'papercloud.v1';
-const saved = READONLY ? null : await storeGet(STORE_KEY).catch((e) => { console.warn('读取已存作品失败', e); return null; });
-const photos = basePhotos.map((p) => ({ ...p }));
-if (saved) {
-  for (const p of photos) if (saved.replaced?.[p.id]) { const r = saved.replaced[p.id]; p.src = r.src; p.width = r.width; p.height = r.height; p.aspect = r.width / r.height; p.fitted = r.fitted !== false; p.back = r.back || null; p.raw = r.raw || null; p.cfg = r.cfg || null; p.texts = r.texts || null; }
-  for (const a of saved.added || []) photos.push({ ...a, aspect: a.width / a.height, fitted: a.fitted !== false, back: a.back || null });
+// ⚠️⚠️ 关键修复（v113）：这三个常量**必须声明在上面的启动读取之前**。
+// 历史上它们用 `var` 声明在文件更下方（约 3350 行），而启动时（这里）就调用了 storeGet：
+// `var` 只提升声明、**赋值语句尚未执行**，于是那一刻 DB_NAME / STORE 都是 undefined，
+// 导致 indexedDB.open(undefined) 打开一个假数据库并抛错——启动读取**必然失败**。
+// 这个 bug 长期被 storeGet 的 localStorage 兜底掩盖（所以平时看不出问题），
+// 一旦去掉兜底就暴露成「刚加的照片刷新后全部消失」。
+const DB_NAME = 'paper-cloud', STORE = 'kv';
+let dbPromise = null;
+// 把「用户数据」（buildUserData 的 {replaced, added} 格式，也是草稿快照的格式）
+// 还原成完整照片数组。启动时喂当前作品，草稿分享/草稿会话喂草稿快照——同一套逻辑，
+// 避免"当前作品能渲染、草稿却渲染不出来"的两处不一致。
+function materializePhotos(userData) {
+  const arr = basePhotos.map((p) => ({ ...p }));
+  if (userData) {
+    for (const p of arr) if (userData.replaced?.[p.id]) { const r = userData.replaced[p.id]; p.src = r.src; p.width = r.width; p.height = r.height; p.aspect = r.width / r.height; p.fitted = r.fitted !== false; p.back = r.back || null; p.raw = r.raw || null; p.cfg = r.cfg || null; p.texts = r.texts || null; p.paper = r.paper || null; }
+    for (const a of userData.added || []) arr.push({ ...a, aspect: a.width / a.height, fitted: a.fitted !== false, back: a.back || null });
+  }
+  arr.forEach((p) => {
+    const w = p.width || (/\/(\d+)\/(\d+)\.jpg$/.exec(p.source_url) || [])[1];
+    const h = p.height || (/\/(\d+)\/(\d+)\.jpg$/.exec(p.source_url) || [])[2];
+    p.aspect = (w && h) ? +w / +h : 1.5;
+    p.back = p.back || null;
+    p.full = p.src;
+  });
+  // 示例照片自带的 30 张「预置手写涂鸦背面」（assets/backs/*.jpg）一律不再加载：
+  // 用户要求把背面那些模拟的画清空——背面回到空白相纸（着色器会填纸色），
+  // 真实内容由用户自己在背面创作，或后续选相纸时重新生成。
+  // 保留 p.back 字段本身（用户自己画过并存下来的背面不受影响，仍要显示）。
+  for (const p of arr) if (p.back && /assets\/backs\//.test(p.back)) p.back = null;
+  return arr;
 }
-photos.forEach((p) => {
-  const w = p.width || (/\/(\d+)\/(\d+)\.jpg$/.exec(p.source_url) || [])[1];
-  const h = p.height || (/\/(\d+)\/(\d+)\.jpg$/.exec(p.source_url) || [])[2];
-  p.aspect = (w && h) ? +w / +h : 1.5;
-  p.back = p.back || null;
-  p.full = p.src;
-});
+const saved = READONLY ? null : await storeGet(STORE_KEY).catch((e) => { console.warn('读取已存作品失败', e); return null; });
+const photos = materializePhotos(saved);
 const P0 = photos.length;
 
 // 每张照片挂两次：k 显示整图，(P0 + k) 是其局部特写。整图填一个上宽下窄的倒锥，
@@ -226,7 +367,19 @@ const sheetData = new Float32Array(MAX_SHEETS * FLOATS_PER_SHEET);
 function writeSheet(n, s) {
   // phase 的高位编码 backOut（≥1000 表示背面朝外），供着色器决定背面 UV 是否镜像
   const ph = s.phase + (s.backOut ? 1000 : 0);
-  sheetData.set([s.x, s.y, s.z, s.renderYaw ?? s.yaw, s.w, s.h, ph, s.layer, s.crop[0], s.crop[1], s.crop[2], s.crop[3]], n * FLOATS_PER_SHEET);
+  // ⚠️ 槽位顺序必须与下面 attrib() 的字节偏移严格一一对应，**写错顺序不会报错、只会静默错乱**：
+  //   0..3   中心 xyz + yaw            → attrib(1) @ 0
+  //   4..7   宽 高 相位 层              → attrib(2) @ 16
+  //   8..11  裁切 uv                    → attrib(3) @ 32
+  //   12..15 交互动力学 位移xyz + 偏航   → attrib(4) @ 48（每帧由弹簧直接 bufferSubData 覆写）
+  //   16..19 相纸 镭射强度/种子/窗口四边 → attrib(5) @ 64、attrib(6) @ 80
+  // 历史教训：曾把相纸数据误写进 12..15，纸片动态位移读到「镭射强度1 / 种子数千」，
+  // 表现为照片被甩飞 + 吊线拉成满屏斜线且静止后一直定住；种子还串到了下一张纸的 x/y。
+  const p = s.paper || {};
+  sheetData.set([s.x, s.y, s.z, s.renderYaw ?? s.yaw, s.w, s.h, ph, s.layer, s.crop[0], s.crop[1], s.crop[2], s.crop[3],
+    0, 0, 0, 0,                                          // 12..15 动力学占位，运行时覆写
+    p.holo || 0, p.seed || 0, p.winL || 0, p.winR || 0,   // 16..19 镭射强度 / 种子 / 左右窗口
+    p.winT || 0, p.winB || 0, p.aspect || backAspect || 1, p.baseLum ?? 1], n * FLOATS_PER_SHEET); // 20..23 上下窗口+背面比例+底色亮度
 }
 // 只更新某张纸片的偏航（翻转动画用，避免整块重传）
 function writeYaw(n, yaw) {
@@ -235,13 +388,18 @@ function writeYaw(n, yaw) {
   gl.bindBuffer(gl.ARRAY_BUFFER, instances);
   gl.bufferSubData(gl.ARRAY_BUFFER, off * 4, sheetData.subarray(off, off + 4));
 }
-// 每张照片用「自己的」确定性随机源：seed 只由 photoIndex 与 isStudy 决定，
+// 每张照片用「自己的」确定性随机源：seed 只由 photoIndex 与isStudy 决定，
 // 因此某张照片新增背面/被裁剪都不会影响其它照片的取景，刷新后布局绝对稳定
-function makeSheet(photoIndex, isStudy) {
+//
+// yRange：候选高度区间。**必须在候选搜索之内就限定**，不能选完再把 y 夹回来 ——
+// 后夹会把"最空的那个位置"破坏掉（空位优化是基于候选 y 算出来的）。
+// 用户新添加的照片传 [1.6, 4.0]（见 addPhoto）；示例照片沿用历史上的宽区间。
+function makeSheet(photoIndex, isStudy, yRange) {
+  const Y0 = yRange ? yRange[0] : 1.55, Y1 = yRange ? yRange[1] : 4.55;
   const rnd = mulberry32(0x9e37 + photoIndex * 7919 + (isStudy ? 104729 : 0));
   let best, score = -1;
   for (let k = 0; k < 30; k++) {
-    const y = 1.55 + rnd() * 3, R = 1 + 1.6 * ((y - 1.55) / 3) ** .6, a = rnd() * Math.PI * 2, r = R * Math.sqrt(rnd());
+    const y = Y0 + rnd() * (Y1 - Y0), R = 1 + 1.6 * ((y - Y0) / (Y1 - Y0)) ** .6, a = rnd() * Math.PI * 2, r = R * Math.sqrt(rnd());
     const x = Math.cos(a) * r * 1.15, z = Math.sin(a) * r;
     let d = 9;
     for (const s of sheets) d = Math.min(d, Math.hypot(s.x - x, (s.y - y) * 1.4, s.z - z));
@@ -250,9 +408,14 @@ function makeSheet(photoIndex, isStudy) {
   const ap = photos[photoIndex].aspect;
   let w, h, cw, ch, u, v;
   if (photos[photoIndex].fitted && !isStudy) {
-    // 经过编辑器裁剪的照片：纸片按照片比例生成，整图全幅贴入，不再随机裁切
+    // 经过编辑器裁剪的照片：纸片按照片比例生成，整图全幅贴入，不再随机裁切。
+    //
+    // ⚠️ 尺寸区间维持原样（.55~.80 / 宽 .32~.8），**不要为了"更有随机性"而放宽**。
+    //   v106 曾把高度放宽到 .40~1.00、宽度上限提到 1.05 → 随机性确实上来了，
+    //   但用户实测反馈「有的照片大的吓人了」——因为云里已有 30 张示例照片，
+    //   再放大镜般的新照片会直接压住整片云。已按用户要求还原。
     h = .55 + rnd() * .25;
-    w = ap * h; // 纸片比例即照片比例（照片整幅贴满，无内边）
+    w = ap * h;
     if (w < .32 || w > .8) { w = Math.max(.32, Math.min(.8, w)); h = w / ap; }
     u = 0; v = 0; cw = 1; ch = 1;
   } else {
@@ -266,7 +429,10 @@ function makeSheet(photoIndex, isStudy) {
   // 背面朝向也用独立随机源：有无背面都不影响其它纸片
   // 背面朝向：约 1/4 纸片背面朝外（正反混飘但风景照仍是主角，米色太多会糊成一片）
   const backOut = !!photos[photoIndex].back && rnd() < .25;
-  return { ...best, yaw, renderYaw: yaw + (backOut ? Math.PI : 0), backOut, flipped: backOut, flipAnim: null, w, h, phase, photo: photoIndex, layer: photoIndex, study: isStudy, crop: [u, v, u + cw, v + ch] };
+  // 相纸信息（镭射强度 + 照片窗口内缩），供着色器把全息流光只画在相纸留白上。
+  // stock 照片（未过编辑器）没有相纸边框概念 → holo=0，即普通纸。
+  const pp = photos[photoIndex].paper || null;
+  return { ...best, yaw, renderYaw: yaw + (backOut ? Math.PI : 0), backOut, flipped: backOut, flipAnim: null, w, h, phase, photo: photoIndex, layer: photoIndex, study: isStudy, crop: [u, v, u + cw, v + ch], paper: pp };
 }
 { // 每张照片挂一张整图。示例照片数量多（30 张），不再额外挂「特写」纸片——
   // 否则纸片翻倍会挤成一团；照片少时或用户自己添加的照片仍可保留特写
@@ -298,12 +464,17 @@ attrib(0, 3, 16, 0, 0);
 attrib(1, 1, 16, 12, 0);
 
 const instances = buffer(sheetData);
+window.__instances = instances;   // 自动化测试读回 GPU 真实数据用
 const sheetVao = gl.createVertexArray();
 gl.bindVertexArray(sheetVao);
 buffer(new Float32Array(Array.from({ length: 7 }, (_, i) => [i / 6 - .5, -.5, i / 6 - .5, .5]).flat()));
 attrib(0, 2, 0, 0, 0);
 gl.bindBuffer(gl.ARRAY_BUFFER, instances);
 for (let i = 0; i < 4; i++) attrib(i + 1, 4, FLOATS_PER_SHEET * 4, i * 16, 1);
+// 相纸数据（镭射强度/种子/照片窗口）：必须一并绑定，否则着色器读到的是默认 0，
+// 表现为「镭射纸完全不显色」——这类漏绑不会报错，只会静默失效。
+attrib(5, 4, FLOATS_PER_SHEET * 4, 64, 1);
+attrib(6, 4, FLOATS_PER_SHEET * 4, 80, 1);
 const threadVao = gl.createVertexArray();
 gl.bindVertexArray(threadVao);
 gl.bindBuffer(gl.ARRAY_BUFFER, instances);
@@ -350,19 +521,32 @@ async function loadLayerImage(src, layer) {
   gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, LAYER, LAYER, 1, gl.RGBA, gl.UNSIGNED_BYTE, img);
 }
 // 背面纹理：src 为空则填纸色（无背面创作）
-async function loadBackLayer(src, layer) {
+async function loadBackLayer(src, layer, aspect) {
+  // 纹理数组固定是 LAYER×LAYER 的正方形，而纸片几何按 backW:backH（长方形）。
+  // 直接把长方形背面图拉伸成正方形会让箔面纹理纵向压扁、纹路变形。
+  // 正确做法：按该照片自己的宽高比做「等比缩放 + 居中」放进方形纹理，
+  // 采样端用同样的映射（见片元着色器 vPaper2.z），两侧比例一致、图案不变形。
+  // aspect 来自照片记录自身的 paper.aspect，不用全局 backAspect ——
+  // 否则编辑下一张会改变上一张已上传纹理的采样比例。
+  const ar = aspect || backAspect || 1;
   let img;
   if (src) {
     const blob = await (await fetch(src)).blob();
-    img = await createImageBitmap(blob, { resizeWidth: LAYER, resizeHeight: LAYER, resizeQuality: 'high' });
-    if (img.width !== LAYER || img.height !== LAYER) { scratch.drawImage(img, 0, 0, LAYER, LAYER); img = scratch.canvas; }
+    img = await createImageBitmap(blob);
   } else {
     const b = document.createElement('canvas'); b.width = b.height = LAYER;
     b.getContext('2d').fillStyle = '#ece6db'; b.getContext('2d').fillRect(0, 0, LAYER, LAYER);
     img = await createImageBitmap(b);
   }
+  // 目标在方形纹理里的居中区域（contain：完整放进去，不裁切、不变形）
+  let dw = LAYER, dh = LAYER;
+  if (ar >= 1) dh = Math.round(LAYER / ar); else dw = Math.round(LAYER * ar);
+  scratch.canvas.width = LAYER; scratch.canvas.height = LAYER;
+  scratch.fillStyle = '#e8e2d6'; scratch.fillRect(0, 0, LAYER, LAYER);
+  scratch.imageSmoothingQuality = 'high';
+  scratch.drawImage(img, (LAYER - dw) / 2, (LAYER - dh) / 2, dw, dh);
   gl.activeTexture(gl.TEXTURE3);
-  gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, LAYER, LAYER, 1, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, LAYER, LAYER, 1, gl.RGBA, gl.UNSIGNED_BYTE, scratch.canvas);
   gl.activeTexture(gl.TEXTURE0);
 }
 // 聚焦某张且翻到背面时：把该照片的高清背面载入 uBackFull，保证手写字清晰
@@ -381,7 +565,7 @@ async function loadBackFull(i) {
 }
 const loaded = Promise.all(photos.map(async (p, i) => {
   try { await loadLayerImage(p.src, i); } catch (err) { console.warn('缺少照片', p.src, err); }
-  try { if (p.back) await loadBackLayer(p.back, i); } catch (err) { console.warn('缺少背面', p.back, err); }
+  try { if (p.back) await loadBackLayer(p.back, i, p.paper && p.paper.aspect); } catch (err) { console.warn('缺少背面', p.back, err); }
 })).then(() => {
   gl.activeTexture(gl.TEXTURE0);
   gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
@@ -768,6 +952,9 @@ function flingSheet() {
     d.vz += (sheetDrag.vz || 0) * 0.55;
   }
 }
+// 是否已放大聚焦（区别于总览态）。总览 HOME.dist=10.5，聚焦后 goal.dist 远小于此；
+// 据此区分「远距离单击=查看」与「居中放大后再单击=翻转」，避免只看隐藏 sel 状态导致的误翻。
+const zoomedIn = () => cam.dist < 8.5;
 const release = (e) => {
   pointers.delete(e.pointerId);
   // 触摸抬起时可能还残留同源的 pointer 记录（部分浏览器触摸序列的 quirks），
@@ -791,24 +978,24 @@ const release = (e) => {
         const j = pick(e.clientX, e.clientY);
         const pi = prev.i;
         if (j >= 0 && j === pi) { select(j); reeditPhoto(j); return; }
-        if (j >= 0) { if (sel === j) flipSheet(j); else select(j); }
-        else if (pi >= 0) { if (sel === pi) flipSheet(pi); else select(pi); }
+        if (j >= 0) { if (j === sel && zoomedIn()) flipSheet(j); else select(j); }
+        else if (pi >= 0) { if (pi === sel && zoomedIn()) flipSheet(pi); else select(pi); }
         return;
       }
       const ii = pick(e.clientX, e.clientY);
       lastTap = ii >= 0 ? { x: e.clientX, y: e.clientY, t: now, i: ii } : null;
       // 单击立刻响应（聚焦/翻转）——双击会在第二次轻点时补上编辑，不必等
-      if (ii >= 0) { if (sel === ii) flipSheet(ii); else select(ii); }
+      if (ii >= 0) { if (ii === sel && zoomedIn()) flipSheet(ii); else select(ii); }
       sheetDrag = null;
       return;
     }
     if (sheetDrag) {
-      // 原地点击：已聚焦的那张→翻转看背面；否则照常飞入聚焦（单击翻转是原有手感，不改）
-      if (sel === sheetDrag.i) flipSheet(sheetDrag.i); else select(sheetDrag.i);
-      sheetDrag = null; // 拉动后松手：目标归零，弹簧自然回弹
+      // 原地点击：已放大居中的那张→翻转看背面；否则飞入聚焦（先聚焦、再单击才翻）
+      const i = sheetDrag.i; sheetDrag = null; // 拉动后松手：目标归零，弹簧自然回弹
+      if (i === sel && zoomedIn()) flipSheet(i); else select(i);
     } else {
       const i = pick(e.clientX, e.clientY);
-      if (i >= 0) { if (sel === i) flipSheet(i); else select(i); }
+      if (i >= 0) { if (i === sel && zoomedIn()) flipSheet(i); else select(i); }
     }
   } else if (e.type !== 'pointerup') lastTap = null;
 };
@@ -885,22 +1072,21 @@ fileInput.addEventListener('change', () => {
 // ---------------------------------------------------------------------------
 const editor = $('editor'), edImg = $('edImg'), edStage = $('edStage'), edCrop = $('edCrop');
 const edPrev = $('edPrev'), pctx = edPrev.getContext('2d');
-const edit = { ratio: 0, crop: null, frame: 'polaroid', fw: .07, series: 'classic', paperId: 'warm', custom: '#f4f1ea', lastPaper: { classic: 'warm' }, tpl: 'wide', pending: null, pendingBack: null, pendingTexts: null, restore: null, origURL: null, drag: null, mode: 'front', backURL: null, tool: 'pencil', color: '#35302a', size: 4, bold: false, italic: false, font: "'XiaXingKai', cursive", _backInit: false };
+const edit = { ratio: 0, crop: null, frame: 'polaroid', fw: .15, series: 'solid', paperId: '#f4f1ea', custom: '#f4f1ea', lastPaper: { solid: '#f4f1ea' }, tpl: 'wide', pending: null, pendingBack: null, pendingTexts: null, restore: null, origURL: null, drag: null, mode: 'front', backURL: null, tool: 'pencil', color: '#35302a', size: 4, bold: false, italic: false, font: "'XiaXingKai', cursive", _backInit: false };
 const MINC = 24;               // 最小裁剪尺寸（图像像素）
+// 裁剪框到图片边缘时必须留出的余量（图像像素）：把手 13px 贴框内缘，若框紧贴图片边，
+// 把手会有一半落在图片之外、看起来"跑到框外面"。留 7px 让把手始终压在图片上。
+// 与 CSS 里 .ed-crop span 的偏移 0 配套（早先是 -7px，负偏移会被 stage 的 overflow:hidden 切掉）。
+const CROPPAD = 7;
 
 // ---------------------------------------------------------------------------
-// 相纸系统：fill 纯色 / grad 渐变 / doodle 照片之上的手绘装饰
+// 相纸系统：纯色（预选色 + 调色球）/ 涂鸦（手绘装饰）/ 镭射（全息箔）/ 自制（上传图案）
+// 「经典」已下线：那 4 种纸色本质就是纯色，老作品还原时在 applyRestore 里映射到纯色
 // ---------------------------------------------------------------------------
 const PAPERS = {
-  classic: [
-    { id: 'warm', name: '暖白', fill: '#f4f1ea' },
-    { id: 'pure', name: '纯白', fill: '#fdfcf8' },
-    { id: 'cream', name: '米黄', fill: '#f5eeda' },
-    { id: 'kraft', name: '牛皮', fill: '#c9a878' },
-  ],
   solid: [
     ['#e60012', '大红'], ['#f37021', '橙'], ['#fdb913', '橙黄'], ['#6abf4b', '草绿'], ['#56b9e9', '天蓝'], ['#27447b', '深蓝'],
-    ['#7d5fc4', '紫'], ['#d062c4', '洋红'], ['#ea5f8f', '玫红'], ['#8a5a3b', '棕'], ['#f4f1ea', '米白'], ['#1d1c1a', '黑'],
+    ['#7d5fc4', '紫'], ['#d062c4', '洋红'], ['#ea5f8f', '玫红'], ['#f4f1ea', '米白'], ['#1d1c1a', '黑'],
   ].map(([hex, name]) => ({ id: hex, name, fill: hex })),
   doodle: [
     { id: 'kitty', name: '凯蒂线描', fill: '#fbf8f1', doodle: doodleKitty },
@@ -910,24 +1096,162 @@ const PAPERS = {
     { id: 'moon', name: '月亮星星', fill: '#f7f4ec', doodle: doodleMoon },
     { id: 'hearts', name: '爱心', fill: '#fbf9f4', doodle: doodleHearts },
   ],
+  // 真实镭射箔的底色是**金属灰 / 深色**（参考图里三种都是），虹彩是「叠加在金属底上的光」，
+  // 而不是把底色本身染成粉彩。旧色板底色用粉彩（#f3cfd8/#d9f0d2）+ 高饱和色带 → 满屏艳丽、很假。
+  // 现按参考图重做：底色全部换成中性金属调，只有玄黑保持深色；色带降到柔和粉彩。
+  // 六张必须「一眼能分辨」，靠的是**底色调 + 明度**拉开距离，不是都做成灰银色。
+  // 上一版六张 base 全是灰（明度挤在 0.6~0.75）、彩带也都是低饱和灰彩 →
+  // 用户反馈「每张都一样、看不出区别、连黑镭射都偏白」。
+  // 现按参考图思路重排：银白 / 淡金 / 玄黑 / 青蓝 / 玫粉 / 墨绿，各占一个明显不同的色相与明度档。
+  // 底色仍保持「金属/深色」质感（不回到艳丽糖果色），但允许明确的色相倾向。
   laser: [
-    { id: 'rainbow', name: '彩虹镭射', grad: laserGrad([[0, '#f6b8c5'], [.16, '#f9d8a6'], [.32, '#f7f0a9'], [.48, '#bfe8c4'], [.62, '#a9dcef'], [.78, '#b7b4ea'], [.9, '#e3b3dd'], [1, '#f6c3a0']]) },
-    { id: 'silver', name: '银白镭射', grad: laserGrad([[0, '#f2f3f5'], [.25, '#d5d9df'], [.45, '#f7f8fa'], [.62, '#c9ced8'], [.8, '#eef0f3'], [1, '#d8dce2']]) },
-    { id: 'noir', name: '玄黑镭射', fill: '#17161a', grad: laserNoir },
-    { id: 'aurora', name: '极光镭射', grad: laserGrad([[0, '#bfeee4'], [.3, '#9fd8ef'], [.55, '#b9b0ee'], [.8, '#d9b3e6'], [1, '#a9e0d2']]) },
+    // ① 银白：中性偏冷的高银灰（最亮的一档）
+    { id: 'rainbow', name: '银虹镭射', grad: laserFoil(9101, [[0, '#cdd3de'], [.3, '#b8c0cf'], [.56, '#dae0e8'], [.8, '#a9b2c2'], [1, '#c0c7d4']], ['#cfd6ee', '#d6cfe4', '#c6dcea', '#e2d4e2', '#ccd6ec', '#d4d0e8', '#c4d4e4', '#ded6dc'], { bands: 9, bandA: .5, angle: 30, grate: .05 }) },
+    // ② 香槟金：暖调金属（与银白拉开色相，最暖的一档）
+    { id: 'silver', name: '香槟金镭射', grad: laserFoil(9203, [[0, '#d4c8a4'], [.32, '#c0b087'], [.58, '#dfd2b0'], [.8, '#b4a87c'], [1, '#cdc09a']], ['#ddd0a4', '#d2c49c', '#dcd8ac', '#ccbe98', '#d4caa8', '#cfc49a', '#d6d6ae', '#dcd2a4'], { bands: 8, bandA: .52, angle: 24, grate: .045 }) },
+    // ③ 玄黑：真正的黑（明度最低档，虹彩在深底上最明显 —— 参考图2/3）
+    { id: 'noir', name: '玄黑镭射', grad: laserFoil(9307, [[0, '#141418'], [.5, '#1c1c22'], [1, '#101014']], ['#7a80b4', '#6f92ac', '#8f82ae', '#6f92a0', '#83799f', '#8a9cb4', '#75878f', '#9486a8'], { bands: 9, bandA: .42, angle: 40, grate: .06, grainAmp: 4 }) },
+    // ④ 青蓝：明确冷蓝调（与银白/香槟金的色相距离最大）
+    { id: 'aurora', name: '青蓝镭射', grad: laserFoil(9409, [[0, '#6f8ca6'], [.34, '#5e7c9c'], [.66, '#74889f'], [1, '#69849f']], ['#8ab4cc', '#78a0c0', '#8c94bc', '#6eacc0', '#82a8c4', '#7494b4', '#88a6c0', '#6aa8c0'], { bands: 8, bandA: .52, angle: 18, grate: .05 }) },
+    // ⑤ 玫粉：明确的暖粉调（第二暖，与香槟金在色相上分开：粉 vs 黄）
+    { id: 'sakura', name: '玫粉镭射', grad: laserFoil(9511, [[0, '#b5859a'], [.5, '#a3748c'], [1, '#ad8090']], ['#cfa8b8', '#c09fb0', '#b89cbc', '#cba8b4', '#c0a2b2', '#b89eae', '#c4a8b2', '#cba4b8'], { bands: 8, bandA: .52, angle: 50, grate: .045 }) },
+    // ⑥ 墨绿：深色冷绿（第三档明度，与玄黑同深但色相完全不同）
+    { id: 'ocean', name: '墨绿镭射', grad: laserFoil(9613, [[0, '#66847c'], [.5, '#54746c'], [1, '#627d75']], ['#82b4a2', '#76a496', '#88a0b4', '#7cb0a0', '#84a89c', '#70a094', '#88a4ac', '#7caea0'], { bands: 8, bandA: .5, angle: 12, grate: .05 }) },
+  ],
+  custom: [
+    { id: 'upload', name: '我的相纸' },
   ],
 };
-function laserGrad(stops) {
-  return (ctx, w, h) => {
-    const g = ctx.createLinearGradient(0, 0, w, h);
-    for (const [t, c] of stops) g.addColorStop(t, c);
-    return g;
-  };
+// —— 镭射相纸：真实全息箔质感（而非简单渐变仿制）——
+// 三层叠加：① 对角金属底色渐变 ② 数条宽「流光」干涉色带（screen 提亮，角度/厚度伪随机）
+// ③ 细衍射光栅纹（沿主方向的微细彩虹线条，overlay 混合）+ ④ 高光闪点。
+// 全程用固定 seed 的确定性随机：同一张纸在色卡 / 预览 / 最终合成里纹理完全一致；
+// 且位置按画布比例取值，不同分辨率下图案等比缩放，不会出现「色卡一套、成品另一套」。
+function rgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
-function laserNoir(ctx, w, h) {
-  const g = ctx.createLinearGradient(0, h, w, 0);
-  for (const [t, c] of [[0, 'rgba(255,122,150,.18)'], [.25, 'rgba(255,209,128,.14)'], [.5, 'rgba(122,229,180,.13)'], [.75, 'rgba(122,168,255,.17)'], [1, 'rgba(201,132,255,.18)']]) g.addColorStop(t, c);
-  return g;
+// 衍射光栅的微纹色：必须是**低饱和的柔和色**，不是粉彩糖果色。
+// 旧版用 ['#ff9aa2','#ffd28a',...] 这套高饱和亮色，配合「浅底放大 4 倍」的强度公式，
+// 叠上去就是满屏艳丽花纹（用户反馈「很假」）。真镭射的微纹只在近看时隐约可见。
+const GRATING = ['#c8ccd8', '#d2ccd8', '#c8d4d0', '#d4d0c4', '#ccd0da', '#d0ccd4', '#c4d0cc'];
+function laserFoil(seed, base, bandCols, o = {}) {
+  const nBands = o.bands ?? 5, ang0 = (o.angle ?? 32) * Math.PI / 180, nGlint = o.glints ?? 3, grate = o.grate ?? .09;
+  // 光栅纹理强度按底色亮度自适应。
+  // ⚠️ 底色改成金属灰后（亮度 ~0.6~0.75），旧公式会放大 2~2.5 倍把微纹变成艳丽花纹。
+  // 现在只做温和补偿：浅底略强、深底略弱，范围收窄到 0.7~1.25 倍。
+  // 真正让镭射"看起来像镭射"的是着色器里的实时干涉流光，不是这里烘焙的静态花纹。
+  // ⚠️ 这里曾有个一直存在的错误：`parseInt(c.slice(1), 16)` 把 '141418' 当**十六进制**解析成 1315864，
+  //    于是 lum 巨大、bright 恒等于 1 —— 意味着「按底色亮度自适应」的所有分支
+  //    （深底 special-case、bandMul 收敛、颗粒幅度）**从来没生效过**，玄黑一直被当浅底处理。
+  //    现在改成解析 r/g/b 三个分量求平均（并换算到 0~255 的亮度）。
+  const lum = base.reduce((a, [, c]) => {
+    const n = parseInt(c.slice(1), 16);
+    // #rrggbb → 取前两通道近似亮度（.299R + .587G + .114B）
+    return a + (((n >> 16) & 255) * .299 + ((n >> 8) & 255) * .587 + (n & 255) * .114);
+  }, 0) / base.length;
+  const bright = Math.max(0, Math.min(1, lum / 235));  // 0=近黑底, 1=近白底
+  const bandMul = o.bandMul ?? (1.15 + bright * .35);  // 深底(加法)1.15、浅底(screen)1.5 但浅底本身已很亮
+  const glintMul = o.glintMul ?? (1.2 - bright * .5);
+  return (ctx, w, h) => {
+    const rnd = rngOf(seed);
+    const g = ctx.createLinearGradient(0, 0, w * .72, h);
+    for (const [t, c] of base) g.addColorStop(t, c);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    // ① 宽流光色带：沿斜向的软边亮带。
+    //    ⚠️ 混合模式必须按底色深浅选，这是「黑镭射变灰白」的根因：
+    //      screen 的公式是 1-(1-a)(1-b)，**底色越暗提升越明显**——
+    //      黑底(0.08) 叠一层 alpha .3 的色带直接变成 0.36（灰），黑底被整体冲淡。
+    //      真实黑镭射（参考图2/3）就是「纯黑底 + 局部泛出的彩色光带」，
+    //      所以深底必须用 **plus-lighter**（纯加法，只提亮不抬黑底），浅底才用 screen。
+    const deepBase = bright < .3;
+    ctx.globalCompositeOperation = deepBase ? 'plus-lighter' : 'screen';
+    const nUse = deepBase ? Math.max(3, Math.round(nBands * .55)) : nBands;
+    for (let i = 0; i < nUse; i++) {
+      const col = bandCols[i % bandCols.length];
+      const px = (i + .15 + rnd() * .7) / nUse * w;
+      const ang = ang0 + ((i % 2) ? .6 : -.12) + (rnd() - .5) * .35;
+      const th = h * (.28 + rnd() * .34);
+      const dx = Math.cos(ang), dy = Math.sin(ang);
+      const bg = ctx.createLinearGradient(px - dx * th, -dy * th, px + dx * th, dy * th);
+      bg.addColorStop(0, 'rgba(0,0,0,0)');
+      // 深底用加法，强度可以更高（加法不会抬黑底，只在色带处增加光）
+      // 深底的色带要「窄而稀疏」——黑纸上只该偶尔泛出一道光，不是整片被照亮。
+      // plus-lighter 是纯加法，多条宽色带累加足以把 #141418 抬到 100+（实测 117）。
+      const ba = (o.bandA ?? .46) * bandMul * (deepBase ? .34 : 1);
+      bg.addColorStop(.5, rgba(col, Math.min(deepBase ? .3 : .8, ba)));
+      bg.addColorStop(.8, rgba(col, Math.min(.2, ba * .34)));
+      bg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+    }
+    // ② 衍射光栅：细密的微纹。
+    //    ⚠️ 早先这里是**等间距直线**（per 固定、lineWidth = 0.9×per），
+    //    深底改 plus-lighter 后这些直线被加法照亮 → 屏幕上出现极其明显的规则横条，
+    //    用户实测「纹理很不自然、生硬、能看到明显痕迹」。
+    //    真实镭射的衍射是**细密且不规则**的，所以改成：
+    //      · 间距带随机抖动（不再等距）
+    //      · 线宽远小于间距（细纹，不成带）
+    //      · 强度大幅压低（只是微光，不是条纹）
+    ctx.globalCompositeOperation = deepBase ? 'plus-lighter' : 'soft-light';
+    {
+      const per = Math.max(2.2, w / 210), dx = Math.cos(ang0), dy = Math.sin(ang0);
+      const nx = -dy, ny = dx, span = (w + h) * 1.2;
+      ctx.lineWidth = Math.max(.6, per * .3);        // 细纹：线宽只有间距的 30%
+      let k = 0, jit = per * 2;
+      for (let t = -span; t < span; t += jit, k++) {
+        jit = per * (1.3 + rnd() * 1.5);             // 间距随机抖动 → 不规则
+        const off = t + (rnd() - .5) * per;          // 每条线再各自偏移
+        // 强度压到 .1 以内：微光而非条纹（深底用加法，.1 就已经可见）
+        ctx.strokeStyle = rgba(GRATING[k % GRATING.length], Math.min(.1, grate * (deepBase ? .5 : .35 + bright * .2)));
+        ctx.beginPath();
+        ctx.moveTo(nx * off - dx * span, ny * off - dy * span);
+        ctx.lineTo(nx * off + dx * span, ny * off + dy * span);
+        ctx.stroke();
+      }
+    }
+    // ③ 高光闪点：几团柔光，模拟箔面上的镜面反光。
+    //    深底同样用 plus-lighter —— screen 会把黑底提成灰（见上方①的说明）。
+    ctx.globalCompositeOperation = deepBase ? 'plus-lighter' : 'screen';
+    for (let i = 0; i < nGlint; i++) {
+      const gx = rnd() * w, gy = rnd() * h, gr = Math.max(w, h) * (.12 + rnd() * .18);
+      const gg = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+      gg.addColorStop(0, `rgba(255,255,255,${Math.min(.5, .28 * glintMul * (deepBase ? .4 : 1))})`);
+      gg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = gg; ctx.fillRect(0, 0, w, h);
+    }
+    // ④ 磨砂颗粒：参考图里最明显的质感特征 —— 金属箔面不是镜面平滑，
+    //    而是有极细的磨砂颗粒（近看闪成一片细密的微光）。
+    //    纯色渐变看起来就是「塑料」，加上颗粒立刻变金属。
+    //
+    // ⚠️ 早先这里是 `getImageData` + 逐像素循环 + `putImageData`（几十万次迭代、
+    //    两次整图内存往返）。而 renderPreview 每次点击相纸/拖滑杆/换颜色都会走
+    //    composite→paintPaper→laserFoil，平板上实测**按钮响应明显延迟**。
+    //    改成「稀疏单像素噪点笔触」：视觉上同样是细密微光（颗粒本就是统计现象），
+    //    但只需画几千个 fillRect，比逐像素快两个数量级。
+    if (o.grain !== false) {
+      const amp = o.grainAmp ?? (bright < .3 ? 3.2 : 6.5);
+      // 密度：每 ~6px 一个点（上限 3 万）。比逐像素循环少两个数量级的手感，
+      // 视觉上仍是连续的磨砂微光；早先试过 w*h/26 太稀，放大看几乎没颗粒。
+      const n = Math.min(30000, Math.round(w * h / 6));
+      ctx.globalCompositeOperation = 'source-over';
+      for (let i = 0; i < n; i++) {
+        // 确定性哈希 → 同一张纸每次纹理一致（色卡/预览/成品一致）
+        const k = (i * 2654435761) >>> 0;
+        const gx = (k % 65536) / 65536 * w;
+        const gy = ((k >>> 16) % 65536) / 65536 * h;
+        const n2 = (((k * 40503) >>> 0) % 1024) / 1024 - .5;
+        const a = Math.abs(n2) * amp * 2;
+        ctx.fillStyle = n2 > 0 ? `rgba(255,255,255,${a / 255})`
+                               : `rgba(0,0,0,${a / 255})`;
+        ctx.fillRect(gx, gy, 1, 1);
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    return null;   // 关键：本函数已把整张纸画完（底色+色带+光栅+闪点）。
+                    // 返回非渐变对象，paintPaper 据此跳过「再 fillRect 一次」——
+                    // 否则那次重刷会用上一次的渐变把上面所有纹理盖掉（黑色镭射看不出来，
+                    // 浅色系就会变成一片死板的渐变，背面尤其明显）。
+  };
 }
 // —— 涂鸦绘制（确定性抖动，所见即所得；坐标为合成图像素） ——
 function scribbleLine(ctx, x0, y0, x1, y1, amp = 1.4) {
@@ -1395,11 +1719,37 @@ function doodleMoon(ctx, w, h, side, bottom) { scatterDoodles(ctx, w, h, side, b
 function doodleHearts(ctx, w, h, side, bottom) { scatterDoodles(ctx, w, h, side, bottom, 88231, null, ['heart', 'heartArrow', 'heart', 'bow', 'sparkle', 'star', 'smile', 'circle', 'crown', 'swirl', 'loops', 'dots3'], curTpl()); }
 function currentPaper() {
   if (edit.series === 'solid' && edit.paperId === 'custom') return { id: 'custom', name: '自定义', fill: edit.custom };
-  return PAPERS[edit.series]?.find((p) => p.id === edit.paperId) || PAPERS.classic[0];
+  if (edit.series === 'custom') return customPaperImg ? { id: 'upload', name: '我的相纸', image: customPaperImg } : { id: 'upload', name: '我的相纸', fill: '#e8e3d8' };
+  return PAPERS[edit.series]?.find((p) => p.id === edit.paperId) || PAPERS.solid[0];
+}
+// 等比铺满绘制（cover）：上传的相纸图案整张铺满，不留白边
+function drawImageCover(ctx, img, w, h) {
+  const s = Math.max(w / img.naturalWidth, h / img.naturalHeight);
+  ctx.drawImage(img, (w - img.naturalWidth * s) / 2, (h - img.naturalHeight * s) / 2, img.naturalWidth * s, img.naturalHeight * s);
+}
+// 相纸层渲染缓存（见 composite 内的说明）：laserFoil 要画色带 + 光栅 + 上千个颗粒点，
+// 实测单张镭射约 30ms（桌面）/ 60~90ms（平板），而用户点色卡就触发一次 → 明显延迟。
+// 解决：① 单张缓存（同 key 直接贴图）② **预热**：进编辑器时把镭射六张全部先画好，
+// 之后点色卡必然命中缓存，点击耗时降到纯 drawImage 的几毫秒。
+let paperLayerCache = null;
+const paperLayerWarm = new Map();   // key → canvas（预热池）
+function paperLayerKey(w, h, side, bottom) {
+  // ⚠️ custom 只在「纯色+调色球」时才有意义，早先把它无条件拼进 key，
+  // 导致预热写的是 `custom=''`、实际命中时是 `custom='#f4f1ea'` → key 永远对不上、缓存从不命中
+  // （实测预热池里 6 张齐活，点色卡仍是 28ms）。现在只对纯色系列带上 custom。
+  // side/bottom 是浮点运算结果，字符串化可能出现 '44.800000000000004' 这类长尾，
+  // 导致预热与实际取到的 key 不一致。统一保留 3 位小数。
+  return `${edit.series}|${edit.paperId}|${edit.series === 'solid' ? edit.custom : ''}|${w}x${h}|${edit.frame}|${side.toFixed(3)}|${bottom.toFixed(3)}`;
 }
 function paintPaper(ctx, w, h, paper) {
+  if (paper.image) { if (paper.image.complete && paper.image.naturalWidth) drawImageCover(ctx, paper.image, w, h); return; }
   if (paper.fill) { ctx.fillStyle = paper.fill; ctx.fillRect(0, 0, w, h); }
-  if (paper.grad) { ctx.fillStyle = paper.grad(ctx, w, h); ctx.fillRect(0, 0, w, h); }
+  if (paper.grad) {
+    const g = paper.grad(ctx, w, h);
+    // 返回 null = 该函数已自行绘制完整纸面（如 laserFoil 叠了多层纹理），不要再重刷。
+    // 否则 ctx.fillStyle = null 会被浏览器忽略、保留上一个渐变，再 fillRect 就把纹理全盖了。
+    if (g) { ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); }
+  }
 }
 
 function openEditor(mode, sheet, file, restore) {
@@ -1421,43 +1771,72 @@ function openEditor(mode, sheet, file, restore) {
   editor.hidden = false;
 }
 // —— 恢复上次的编辑设置：裁剪框 / 相纸系列 / 相纸 / 相框 / 模板 / 配色 ——
+const LEGACY_CLASSIC = { warm: '#f4f1ea', pure: '#fdfcf8', cream: '#f5eeda', kraft: '#c9a878' }; // 已下线的「经典」系列纸色
 function applyRestore(r) {
   const W = edImg.naturalWidth, H = edImg.naturalHeight;
   if (r.series) {
-    edit.series = r.series;
-    for (const el of $('edSeries').children) el.classList.toggle('on', el.dataset.s === r.series);
+    edit.series = r.series === 'classic' ? 'solid' : r.series;   // 「经典」并入纯色
+    for (const el of $('edSeries').children) el.classList.toggle('on', el.dataset.s === edit.series);
     buildPapers();
   }
-  if (r.paperId) { edit.paperId = r.paperId; edit.lastPaper[edit.series] = r.paperId; }
-  if (r.hue != null) edHue.value = r.hue;
-  if (r.sat != null) edSat.value = r.sat;
-  if (r.paperId === 'custom') { const [cr, cg, cb] = hsv2rgb(+edHue.value, +edSat.value / 100, 1); edit.custom = `rgb(${cr},${cg},${cb})`; }
+  if (r.paperId) {
+    edit.paperId = r.paperId;
+    if (LEGACY_CLASSIC[r.paperId]) { edit.paperId = 'custom'; edit.custom = LEGACY_CLASSIC[r.paperId]; } // 老作品的经典纸色 → 自定义色
+    edit.lastPaper[edit.series] = edit.paperId;
+  }
+  if (edit.paperId === 'custom') {
+    if (r.customHex) edit.custom = r.customHex;                              // 新版：直接存 hex
+    else if (r.hue != null) { const [cr, cg, cb] = hsv2rgb(r.hue, (r.sat ?? 30) / 100, 1); edit.custom = `rgb(${cr},${cg},${cb})`; } // 旧版：由色相/饱和度反推
+  }
   if (r.frame) { edit.frame = r.frame; for (const el of $('edFrames').children) el.classList.toggle('on', el.dataset.f === r.frame); }
-  if (r.fw != null) { edit.fw = r.fw; $('edWidth').value = Math.round(r.fw * 100); $('edWidthVal').textContent = Math.round(r.fw * 100) + '%'; }
+  if (r.fw != null) {
+    // 语义迁移：v44 之前 fw = 三边宽（下边 = fw * 2.2）；现在 fw = 下边宽。
+    // 旧存档按 2.2 倍折算成下边，才能保持老照片重新编辑后外观不变。
+    const bw = r.fwV2 ? r.fw : (edit.frame === 'polaroid' ? Math.min(BOTTOM_MAX, r.fw * 2.2) : r.fw);
+    edit.fw = Math.max(BOTTOM_MIN, Math.min(BOTTOM_MAX, bw));
+    $('edWidth').value = Math.round(edit.fw * 100); $('edWidthVal').textContent = Math.round(edit.fw * 100) + '%';
+  }
   if (r.tpl) { edit.tpl = r.tpl; for (const el of $('edTpl').children) el.classList.toggle('on', el.dataset.t === r.tpl); }
+  // 旧存档迁移：v44 曾把「识别出的照片窗口」存进 cfg.win。
+// 现在改为图层套叠、不再识别，把旧窗口折算成照片的缩放（窗口越小=照片要放大）。
+function paperWinRestore(w) {
+  if (!w || !w.w) return;
+  paperFit = Math.max(.2, Math.min(3, 1 / Math.max(.2, w.w)));
+  paperOffX = paperOffY = 0;
+}
+if (r.win) paperWinRestore(r.win);   // 旧存档里的识别窗口：迁移为照片缩放/位移
+  if (r.paperFit) { paperFit = +r.paperFit; paperOffX = +(r.paperOffX || 0); paperOffY = +(r.paperOffY || 0); }
   if (r.crop) { // 裁剪框按比例还原（原图尺寸可能与上次不同）
     edit.crop = { x: r.crop[0] * W, y: r.crop[1] * H, w: r.crop[2] * W, h: r.crop[3] * H };
     clampCrop();
     edit.ratio = r.ratio || 0;
     for (const el of $('edRatios').children) el.classList.toggle('on', +el.dataset.r === edit.ratio);
   }
-  markPapers(); markSwatch(); syncFrameUI(); updateSliderUI();
+  markPapers(); markSwatch(); syncFrameUI(); syncPaperUI();
   renderCropBox();
 }
 // 记录当前编辑设置（存进照片，重新编辑时按它还原）
 function snapshotRestore() {
   const c = edit.crop, W = edImg.naturalWidth || 1, H = edImg.naturalHeight || 1;
   return {
-    series: edit.series, paperId: edit.paperId, frame: edit.frame, fw: edit.fw, tpl: edit.tpl,
-    hue: +edHue.value, sat: +edSat.value, ratio: edit.ratio,
+    series: edit.series, paperId: edit.paperId, frame: edit.frame, fw: edit.fw, fwV2: 1, tpl: edit.tpl, holo: edit.holo || 0, win: edit.win || null,
+    paperFit, paperOffX, paperOffY,   // 自制相纸：照片在镂空内的缩放/位移（v45 起生效）
+    customHex: edit.paperId === 'custom' ? edit.custom : null, ratio: edit.ratio,
     crop: c ? [c.x / W, c.y / H, (c.x + c.w) / W, (c.y + c.h) / H] : null,
   };
 }
-function updateSliderUI() { // 还原配色后刷新滑杆的渐变与预览
-  const [cr, cg, cb] = hsv2rgb(+edHue.value, +edSat.value / 100, 1);
-  edSat.style.setProperty('--satgrad', `linear-gradient(to right, hsl(${edHue.value},0%,80%), hsl(${edHue.value},100%,55%))`);
-  if (edit.paperId === 'custom') edit.custom = `rgb(${cr},${cg},${cb})`;
-  renderPreview();
+// 任意 CSS 颜色 → #rrggbb（调色球 input[type=color] 只认 hex）
+function colorToHex(c) {
+  if (/^#[0-9a-f]{6}$/i.test(c)) return c;
+  const x = document.createElement('canvas'); x.width = x.height = 1;
+  const g = x.getContext('2d'); g.fillStyle = c; g.fillRect(0, 0, 1, 1);
+  const d = g.getImageData(0, 0, 1, 1).data;
+  return '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+}
+function syncPaperUI() { // 还原/换纸后：同步调色球的当前色与选中态，并刷新预览
+  const ball = document.querySelector('#edPapers .ed-picker input[type=color]');
+  if (ball) ball.value = colorToHex(edit.custom);
+  markPapers(); renderPreview();
 }
 
 function closeEditor() { editor.hidden = true; edit.pending = null; edit.drag = null; edImg.removeAttribute('src'); }
@@ -1491,9 +1870,15 @@ function applyRatio(r, initial) {
 }
 function clampCrop() {
   const c = edit.crop, W = edImg.naturalWidth, H = edImg.naturalHeight;
-  c.w = Math.min(c.w, W); c.h = Math.min(c.h, H);
-  c.x = Math.max(0, Math.min(c.x, W - c.w));
-  c.y = Math.max(0, Math.min(c.y, H - c.h));
+  // 贴边时留 CROPPAD 余量，让 13px 的把手有一半压在图片内（见 CROPPAD 注释）。
+  // ⚠️ px/py **不能**跟着框宽缩小（如 Math.min(CROPPAD, c.w/3)）：框被压到 8px 时
+  //   余量退化成 2.7px，装不下 13px 把手 → 右列把手又跑出舞台（实测 R12.3 < 536）。
+  //   正确做法：余量恒为 CROPPAD，同时把框宽一起夹到「2×CROPPAD」以内，
+  //   这样任何时候框都至少比余量宽，边距不会被吃掉。
+  const px = Math.min(CROPPAD, W / 3), py = Math.min(CROPPAD, H / 3);
+  c.w = Math.min(c.w, W - px * 2); c.h = Math.min(c.h, H - py * 2);
+  c.x = Math.max(px, Math.min(c.x, W - px - c.w));
+  c.y = Math.max(py, Math.min(c.y, H - py - c.h));
 }
 function moveCrop(handle, st, dx, dy) {
   const W = edImg.naturalWidth, H = edImg.naturalHeight, r = edit.ratio;
@@ -1514,8 +1899,11 @@ function moveCrop(handle, st, dx, dy) {
   let l, t;
   if (Wt && !E) l = st.x + st.w - nw; else if (E && !Wt) l = st.x; else l = st.x + st.w / 2 - nw / 2;
   if (N && !S) t = st.y + st.h - nh; else if (S && !N) t = st.y; else t = st.y + st.h / 2 - nh / 2;
-  l = Math.max(0, Math.min(l, W - nw)); t = Math.max(0, Math.min(t, H - nh));
+  // ⚠️ 这里必须与 clampCrop 用同一套边距（CROPPAD），否则框能贴到 0 边距、
+  // 把手就会有一半落在图片之外。早先这里写的是 `Math.max(0, ...)`，
+  // 而 clampCrop 又有一套自己的钳制，两者不一致 → 缩放时框会"跳"到图片最边上。
   edit.crop = { x: l, y: t, w: nw, h: nh };
+  clampCrop();
 }
 // 裁剪交互
 edStage.addEventListener('pointerdown', (e) => {
@@ -1544,8 +1932,12 @@ const endDrag = () => { edit.drag = null; };
 edStage.addEventListener('pointerup', endDrag);
 edStage.addEventListener('pointercancel', endDrag);
 
-// 相框尺寸：非涂鸦系列保留滑杆（宽度以裁剪短边的百分比计，拍立得下边 ≈ 其余边的 2.2 倍）；
-// 涂鸦系列锁死为三个固定模板（窄边 / 等边 / 宽边），与涂鸦分布一一对应、所见即所得
+// 相框尺寸：三边（上/左/右）固定不变，只有下边随滑杆延长（拍立得风格）。
+// 用户明确要求「只能下面延长，其余三边固定边距保持不变」，所以 side 不再跟滑杆走。
+// 滑杆上限从 15% 提到 30%，让下边能留出写字/放日期的空间。
+// 涂鸦系列则锁死为三个固定模板（窄边 / 等边 / 宽边），与涂鸦分布一一对应、所见即所得
+const SIDE_FIXED = .07;         // 三边固定边距（裁剪短边的 7%）
+const BOTTOM_MIN = .03, BOTTOM_MAX = .30;
 const DOODLE_TPLS = {
   narrow: { side: .045, bottom: .08 }, // 窄边：四边 4.5%，下宽 8%
   equal:  { side: .07, bottom: .07 },  // 等边：四边 7%
@@ -1560,20 +1952,65 @@ function frameDims() {
     return { side: t.side * b, bottom: t.bottom * b };
   }
   if (edit.frame === 'none') return { side: 0, bottom: 0 };
-  const bw = edit.fw * b;
-  return edit.frame === 'equal' ? { side: bw, bottom: bw } : { side: bw, bottom: bw * 2.2 };
+  const side = SIDE_FIXED * b;                       // 三边恒定
+  if (edit.frame === 'equal') return { side, bottom: side }; // 等边：下边跟随三边，不可单独调
+  return { side, bottom: Math.max(BOTTOM_MIN, Math.min(BOTTOM_MAX, edit.fw)) * b };
 }
 function composite(scaleCap) {
-  const c = edit.crop, { side, bottom } = frameDims();
+  const c = edit.crop;
+  // 自制相纸 = 图层套叠：照片铺满最底层当作"内容"，相纸底图叠在**上层**。
+  // 用户上传的是「已经扣好镂空的相纸底图」（PNG 的透明区域就是照片窗口），
+  // 所以完全不需要识别窗口——镂空形状由用户在设计软件里自己扣好，套上去就对了。
+  // 这也是用户明确要求的做法：识别窗口总是差几像素，而图层套叠 100% 准确。
+  if (edit.series === 'custom' && customPaperImg) {
+    const iw = customPaperImg.naturalWidth, ih = customPaperImg.naturalHeight;
+    const s = Math.min(1, scaleCap / Math.max(iw, ih));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(iw * s)); cv.height = Math.max(1, Math.round(ih * s));
+    const ctx = cv.getContext('2d');
+    // ① 底层：照片按 cover 铺满整张（照片比例与相纸不一致时裁掉多余部分）
+    ctx.save();
+    ctx.imageSmoothingQuality = 'high';
+    const sc = Math.max(cv.width / c.w, cv.height / c.h) / paperFit;
+    const sw = cv.width / sc, sh = cv.height / sc;
+    ctx.drawImage(edImg,
+      c.x + c.w / 2 - sw / 2 + paperOffX * cv.width, c.y + c.h / 2 - sh / 2 + paperOffY * cv.height,
+      sw, sh, 0, 0, cv.width, cv.height);
+    ctx.restore();
+    // ② 上层：相纸底图原样叠上。它的透明镂空处自然露出底层照片，不透明处就是相纸花纹。
+    ctx.drawImage(customPaperImg, 0, 0, cv.width, cv.height);
+    // 流光着色器用的窗口：铺满整张（相纸是整张底图，留白由镂空本身定义）
+    cv.windowInsets = { l: 0, r: 0, t: 0, b: 0 };
+    return cv;
+  }
+  const { side, bottom } = frameDims();
   const ow = c.w + side * 2, oh = c.h + side + bottom;
   const s = Math.min(1, scaleCap / Math.max(ow, oh));
   const cv = document.createElement('canvas');
   cv.width = Math.max(1, Math.round(ow * s)); cv.height = Math.max(1, Math.round(oh * s));
   const ctx = cv.getContext('2d');
-  paintPaper(ctx, cv.width, cv.height, currentPaper());
+  // 相纸层缓存：laserFoil 要画色带 + 光栅 + 上千个颗粒点，是 composite 里最贵的一步。
+  // 而用户拖相框滑杆、改裁剪时尺寸常常不变 → 同一张相纸被反复重画。
+  // 这里按「相纸 id + 成品尺寸」缓存，命中时直接贴图，省掉整层重绘。
+  // 实测平板上这一步是「按钮响应慢」的主因。
+  const paper = currentPaper();
+  const key = paperLayerKey(cv.width, cv.height, side, bottom);
+  let layer = paperLayerWarm.get(key);
+  if (!layer) {
+    layer = { key, cv: document.createElement('canvas') };
+    layer.cv.width = cv.width; layer.cv.height = cv.height;
+    paintPaper(layer.cv.getContext('2d'), cv.width, cv.height, paper);
+    paperLayerWarm.set(key, layer);
+    // 池子只留最近 12 张，防止长时间编辑后无限增长
+    if (paperLayerWarm.size > 12) paperLayerWarm.delete(paperLayerWarm.keys().next().value);
+  }
+  paperLayerCache = layer;
+  ctx.drawImage(layer.cv, 0, 0);
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(edImg, c.x, c.y, c.w, c.h, side * s, side * s, c.w * s, c.h * s);
-  currentPaper().doodle?.(ctx, cv.width, cv.height, side * s, bottom * s);
+  paper.doodle?.(ctx, cv.width, cv.height, side * s, bottom * s);
+  // 照片窗口在整张相纸里的归一化内缩（左/右/上/下），镭射着色器据此避开照片区
+  cv.windowInsets = { l: side / ow, r: side / ow, t: side / oh, b: bottom / oh };
   return cv;
 }
 function renderPreview() {
@@ -1592,7 +2029,8 @@ $('edFrames').addEventListener('click', (e) => {
   const b = e.target.closest('button'); if (!b) return;
   for (const el of $('edFrames').children) el.classList.toggle('on', el === b);
   edit.frame = b.dataset.f;
-  $('edWidth').disabled = edit.frame === 'none';
+  $('edWidth').disabled = edit.frame !== 'polaroid'; // 只有「拍立得」模式下边可调
+  syncFrameUI();                                    // 等边/无相框时收起滑杆
   renderPreview();
 });
 $('edWidth').addEventListener('input', (e) => {
@@ -1606,42 +2044,106 @@ $('edSeries').addEventListener('click', (e) => {
   for (const el of $('edSeries').children) el.classList.toggle('on', el === b);
   edit.series = b.dataset.s;
   edit.paperId = edit.lastPaper[edit.series] || PAPERS[edit.series][0].id;
-  buildPapers(); syncFrameUI(); renderPreview();
+  buildPapers(); syncFrameUI(); renderPreview(); refreshBackPaper(); syncPaperFitUI();
 });
 function buildPapers() {
   const wrap = $('edPapers');
   wrap.innerHTML = '';
   wrap.classList.toggle('solidgrid', edit.series === 'solid');
   wrap.classList.toggle('doodlegrid', edit.series === 'doodle');
+  wrap.classList.toggle('diygrid', edit.series === 'custom');
   for (const p of PAPERS[edit.series]) {
     const b = document.createElement('button');
-    b.type = 'button'; b.dataset.id = p.id; b.title = p.name;
-    if (edit.series === 'solid') { b.className = 'paper-chip solid' + (edit.paperId === p.id ? ' on' : ''); b.style.background = p.fill; }
-    else {
-      b.className = 'paper-chip' + (edit.paperId === p.id ? ' on' : '');
+    b.type = 'button'; b.dataset.id = p.id;
+    if (p.id === 'upload') {
+      // DIY：色卡区只展示「已保存的相纸模板」，让用户一眼看出这是自己存过的；
+      // 导入入口是下面那块显眼的「＋ 导入相纸」大按钮（用户反馈"看不到加号按钮、
+      // 也看不出这是保存的模板"，所以两者必须分开且都带文字说明）。
+      b.className = 'paper-chip upload' + (edit.paperId === 'upload' && customPaperImg ? ' on' : '');
+      b.title = customPaperImg ? '我的相纸模板（已保存）· 点击选用' : '还没有导入相纸，点下面的「导入相纸」';
+      if (customPaperImg) {
+        const c = document.createElement('canvas'); c.width = 30; c.height = 38;
+        // 缩略图要能看出是"镂空底图"：先垫一层灰底代表照片，再叠相纸，镂空处自然透出灰
+        const x = c.getContext('2d');
+        x.fillStyle = '#9a958c'; x.fillRect(0, 0, 30, 38);
+        drawImageCover(x, customPaperImg, 30, 38);
+        b.appendChild(c);
+      } else {
+        b.textContent = '＋';
+        b.className = 'paper-chip upload empty';
+      }
+      b.onclick = () => {
+        if (!customPaperImg) { $('edDiyImport').click(); return; }
+        edit.paperId = 'upload'; edit.lastPaper.custom = 'upload'; markPapers(); renderPreview(); refreshBackPaper(); syncPaperFitUI();
+      };
+    } else if (edit.series === 'solid') {
+      b.className = 'paper-chip solid' + (edit.paperId === p.id ? ' on' : ''); b.style.background = p.fill; b.title = p.name;
+      b.onclick = () => { edit.paperId = p.id; edit.lastPaper.solid = p.id; markPapers(); renderPreview(); };
+    } else {
+      b.className = 'paper-chip' + (edit.paperId === p.id ? ' on' : ''); b.title = p.name;
       const c = document.createElement('canvas'); c.width = 30; c.height = 38;
       const x = c.getContext('2d');
       paintPaper(x, 30, 38, p);
       x.fillStyle = '#8b857c'; x.fillRect(5, 5, 20, 18); // 示意照片位置
       p.doodle?.(x, 30, 38, 4, 9);
       b.appendChild(c);
+      b.onclick = () => { edit.paperId = p.id; edit.lastPaper[edit.series] = p.id; markPapers(); renderPreview(); refreshBackPaper(); };
     }
-    b.onclick = () => {
-      edit.paperId = p.id;
-      edit.lastPaper[edit.series] = p.id;
-      markPapers(); renderPreview();
-    };
     wrap.appendChild(b);
   }
-  $('edSliders').hidden = edit.series !== 'solid';
+  if (edit.series === 'solid') wrap.appendChild(buildPickerBall()); // 第二行末尾的调色球
+  if (edit.series === 'laser') prewarmLaserLayers();
+}
+// 预热镭射相纸层：laserFoil 单张约 30ms（平板 60~90ms），点色卡才画的话每次都有延迟。
+// 这里在切到镭射系列后，用空闲时间把六张全部画好（每张之间让出一帧，避免卡住 UI）。
+let prewarmTimer = 0;
+function prewarmLaserLayers() {
+  clearTimeout(prewarmTimer);
+  const c = edit.crop;
+  if (!c) return;
+  const { side, bottom } = frameDims();
+  const ow = c.w + side * 2, oh = c.h + side + bottom;
+  const s = Math.min(1, 520 / Math.max(ow, oh));   // 与 renderPreview 的 scaleCap 保持一致
+  const w = Math.max(1, Math.round(ow * s)), h = Math.max(1, Math.round(oh * s));
+  const keep = edit.paperId;
+  let i = 0;
+  const list = PAPERS.laser;
+  const step = () => {
+    if (i >= list.length || edit.series !== 'laser') return;
+    const p = list[i++];
+    const prevId = edit.paperId;
+    edit.paperId = p.id;                       // 让 key 由 paperLayerKey 统一生成，避免两处算法漂移
+    const key = paperLayerKey(w, h, side, bottom);
+    edit.paperId = prevId;
+    if (!paperLayerWarm.has(key)) {
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      paintPaper(cv.getContext('2d'), w, h, p);
+      paperLayerWarm.set(key, { key, cv });
+    }
+    prewarmTimer = setTimeout(step, 16);   // 让出一帧，UI 不卡
+  };
+  prewarmTimer = setTimeout(step, 16);
+}
+// 调色球：与背面画笔颜色那里的自定义球一致（conic 彩虹 + 隐藏的原生取色器）
+function buildPickerBall() {
+  const cu = document.createElement('button');
+  cu.className = 'paper-chip solid ed-picker'; cu.dataset.id = 'custom'; cu.title = '自定义颜色';
+  const ci = document.createElement('input'); ci.type = 'color'; ci.value = colorToHex(edit.custom);
+  ci.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer';
+  ci.addEventListener('input', () => { edit.custom = ci.value; edit.paperId = 'custom'; edit.lastPaper.solid = 'custom'; markPapers(); renderPreview(); refreshBackPaper(); });
+  cu.appendChild(ci);
+  return cu;
 }
 function markPapers() {
   for (const el of $('edPapers').children) el.classList.toggle('on', el.dataset.id === edit.paperId);
 }
-function syncFrameUI() { // 涂鸦系列：相框锁死为三个模板按钮，滑杆隐藏；其余系列照旧
-  const doodle = edit.series === 'doodle';
-  $('edFrames').hidden = doodle;
-  $('edWidthRow').hidden = doodle;
+function syncFrameUI() {
+  // 涂鸦：相框锁死为三个模板按钮，滑杆隐藏
+  // 自制：一切按用户上传的参考图来，相框/宽度控件全部隐藏
+  // 等边：四边等宽，下边不可单独调 → 隐藏下边滑杆
+  const doodle = edit.series === 'doodle', custom = edit.series === 'custom';
+  $('edFrames').hidden = doodle || custom;
+  $('edWidthRow').hidden = doodle || custom || edit.frame === 'equal' || edit.frame === 'none';
   $('edTpl').hidden = !doodle;
 }
 // 涂鸦模板切换：窄边 / 等边 / 宽边（每种涂鸦相纸对每个模板都有独立固定的分布）
@@ -1653,20 +2155,185 @@ $('edTpl').addEventListener('click', (e) => {
 });
 buildPapers();
 syncFrameUI();
-const edHue = $('edHue'), edSat = $('edSat');
 function hsv2rgb(h, s, v) {
   const f = (n) => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
   return [Math.round(f(5) * 255), Math.round(f(3) * 255), Math.round(f(1) * 255)];
 }
-function applySliders() {
-  const [r, g, b] = hsv2rgb(+edHue.value, +edSat.value / 100, 1);
-  edit.custom = `rgb(${r},${g},${b})`;
-  edit.paperId = 'custom'; edit.lastPaper.solid = 'custom';
-  edSat.style.setProperty('--satgrad', `linear-gradient(to right, hsl(${edHue.value},0%,80%), hsl(${edHue.value},100%,55%))`);
-  markPapers(); renderPreview();
+// —— 自制相纸（图层套叠）——
+// 用户上传「已扣好镂空的相纸底图」，照片铺在底层、相纸叠在上层：镂空处自然露出照片。
+// 因此**不再需要识别窗口**（旧实现的自动识别总有几十像素误差，用户实测"还是识别不太准"）。
+// 仍保留两项微调：① 照片在镂空里的缩放与位移（应对镂空比照片大/小）② 换图。
+let paperFit = 1, paperOffX = 0, paperOffY = 0;   // 照片在窗口内的缩放与位移（归一化）
+const PAPER_TEX_KEY = 'ozz_paper_tex';
+const PAPER_NAME_KEY = 'ozz_paper_name';
+let customPaperImg = null;   // 相纸底图（HTMLImageElement）
+let customPaperName = '';    // 底图文件名（显示用，让用户认出自己存的是哪张）
+const OK_PAPER_MIME = /^image\/(jpeg|png)$/i;
+
+function loadCustomPaper() {
+  return new Promise((res) => {
+    const d = (() => { try { return localStorage.getItem(PAPER_TEX_KEY); } catch { return null; } })();
+    if (!d) return res(null);
+    const im = new Image();
+    im.onload = () => res(im); im.onerror = () => res(null);
+    im.src = d;
+  }).then((im) => {
+    if (im) { try { customPaperName = JSON.parse(localStorage.getItem(PAPER_NAME_KEY) || '""'); } catch { customPaperName = ''; } }
+    return im;
+  });
 }
-edHue.addEventListener('input', applySliders);
-edSat.addEventListener('input', applySliders);
+loadCustomPaper().then((im) => {
+  if (!im) return;
+  customPaperImg = im;
+  paperLayerCache = null;   // 底图是异步恢复的，缓存必须失效（key 里只有 'upload'）
+  if (edit.series === 'custom' || edit.paperId === 'upload') { buildPapers(); renderPreview(); refreshBackPaper(); }
+});
+$('edPaperFile').addEventListener('change', (e) => {
+  const f = e.target.files?.[0];
+  e.target.value = '';
+  if (!f) return;
+  // 只接受 JPG / PNG。用户明确要求导入已扣好镂空的底图，PNG 才能带透明通道。
+  const extOk = /\.(jpe?g|png)$/i.test(f.name || '');
+  if (!OK_PAPER_MIME.test(f.type) || !extOk) { toast('相纸只支持 JPG 或 PNG 格式的图片'); return; }
+  const url = URL.createObjectURL(f);
+  const im = new Image();
+  im.onload = () => {
+    URL.revokeObjectURL(url);
+    const s = Math.min(1, 1400 / Math.max(im.naturalWidth, im.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(im.naturalWidth * s)); cv.height = Math.max(1, Math.round(im.naturalHeight * s));
+    const g = cv.getContext('2d');
+    g.drawImage(im, 0, 0, cv.width, cv.height);
+    // PNG 必须原样保存：透明镂空是这套玩法的核心，转 JPEG 会变成黑底
+    const data = f.type === 'image/png' ? cv.toDataURL('image/png') : cv.toDataURL('image/jpeg', .92);
+    try { localStorage.setItem(PAPER_TEX_KEY, data); } catch { /* 存不下就只在本次会话内有效 */ }
+    customPaperImg = new Image();
+    customPaperImg.onload = () => {
+      edit.paperId = 'upload'; edit.lastPaper.custom = 'upload';
+      paperFit = 1; paperOffX = 0; paperOffY = 0;
+      customPaperName = f.name || '我的相纸';
+      // DIY 换了底图但 paperId 仍是 'upload' → 缓存 key 不变，必须显式失效
+      paperLayerCache = null;
+      try { localStorage.setItem(PAPER_NAME_KEY, JSON.stringify(customPaperName)); } catch { /* 忽略 */ }
+      buildPapers(); syncFrameUI(); renderPreview(); refreshBackPaper(); syncPaperFitUI();
+      toast(hasAlpha(customPaperImg) ? '相纸已套上，照片在镂空里显示' : '提示：这张图没有透明镂空，相纸会盖住照片（请用扣好镂空的 PNG）');
+    };
+    customPaperImg.src = data;
+  };
+  im.onerror = () => { URL.revokeObjectURL(url); toast('这张图片读不出来，换一张 JPG / PNG 试试'); };
+  im.src = url;
+});
+// 底图是否含透明像素（判断用户有没有真的扣镂空）
+function hasAlpha(img) {
+  const s = 64;
+  const cv = document.createElement('canvas'); cv.width = s; cv.height = s;
+  const g = cv.getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0, s, s);
+  const d = g.getImageData(0, 0, s, s).data;
+  let clear = 0;
+  for (let i = 3; i < d.length; i += 4) if (d[i] < 200) clear++;
+  return clear > s * s * 0.01;   // 透明像素超过 1% 才算「有镂空」
+}
+// —— 照片在镂空内的缩放/位移：直接在预览上拖动 + 滚轮缩放 ——
+// 用户明确要求「在预览界面直接拖动、滚轮缩放，不要滑杆」。这确实比滑杆直观得多：
+// 拖动是连续反馈，滚轮还能以光标为中心缩放（滑杆只能等值跳变）。
+// 仅在「DIY」且已导入相纸时启用，避免干扰其它系列的预览。
+const prevWrap = $('edPrevWrap');
+let prevDrag = null;
+// DIY 面板：导入按钮 + 已保存模板的说明
+$('edDiyImport').onclick = () => $('edPaperFile').click();
+function syncDiyPanel() {
+  const on = edit.series === 'custom';
+  $('edDiySaved').innerHTML = on
+    ? (customPaperImg
+      ? `<span class="ed-diy-tag">已保存模板：${(customPaperName || '我的相纸').slice(0, 18)}</span>`
+      : '<span class="ed-diy-tag ed-diy-none">还没有导入相纸模板</span>')
+    : '';
+}
+function syncPaperFitUI() {
+  const on = edit.series === 'custom' && !!customPaperImg;
+  $('edPaperFitRow').hidden = !(edit.series === 'custom');   // DIY 面板整体始终显示（含导入按钮）
+  $('edPrevHint').hidden = !on;
+  prevWrap.classList.toggle('ed-pan', on);        // 光标变抓手，提示可拖
+  prevWrap.classList.toggle('ed-panning', !!prevDrag);
+  syncDiyPanel();
+  if (on) $('edPaperFitVal').textContent = Math.round(paperFit * 100) + '%';
+}
+prevWrap.addEventListener('pointerdown', (e) => {
+  if (!(edit.series === 'custom' && customPaperImg)) return;
+  e.preventDefault();
+  // 某些合成事件（自动化测试、部分浏览器的边缘情况）没有活跃指针，捕获会抛错；
+  // 捕获失败不影响拖动本身（window 上的 move/up 仍能收到），所以静默跳过。
+  try { prevWrap.setPointerCapture(e.pointerId); } catch { /* 无活跃指针，忽略 */ }
+  prevDrag = { sx: e.clientX, sy: e.clientY, ox: paperOffX, oy: paperOffY };
+  syncPaperFitUI();
+});
+// move/up 同时挂在 wrap 和 window：正常拖动时指针被 wrap 捕获（事件落在 wrap），
+// 捕获失败或移出 wrap 时则冒泡到 window。两条路径都要能结束拖动，否则会卡住。
+// 照片在成品画布上的位移：把「预览像素差」换算成画布比例。
+// 符号靠自动化测试实证（tools/test-v44.js 有方向断言「右移匹配 > 左移匹配」）：
+// 源码矩形是 c.x + c.w/2 - sw/2 + paperOffX*W，paperOffX 增大 = 源矩形右移
+// = 取景窗往右走 = 画面上的照片内容相对左移，所以要让照片跟着鼠标走必须**取负**。
+const applyDrag = (e) => {
+  const r = edPrev.getBoundingClientRect();
+  paperOffX = prevDrag.ox - (e.clientX - prevDrag.sx) / Math.max(1, r.width);
+  paperOffY = prevDrag.oy - (e.clientY - prevDrag.sy) / Math.max(1, r.height);
+  renderPreview();
+};
+prevWrap.addEventListener('pointermove', (e) => {
+  if (!prevDrag) return;
+  e.preventDefault();
+  applyDrag(e);
+});
+addEventListener('pointermove', (e) => {
+  if (!prevDrag) return;
+  e.preventDefault();
+  applyDrag(e);
+});
+const endPrevDrag = () => { if (!prevDrag) return; prevDrag = null; syncPaperFitUI(); };
+prevWrap.addEventListener('pointerup', endPrevDrag);
+prevWrap.addEventListener('pointercancel', endPrevDrag);
+addEventListener('pointerup', endPrevDrag);
+addEventListener('pointercancel', endPrevDrag);
+// 滚轮缩放：以光标位置为锚点。这是图片查看器的标准手感——光标下那一点在缩放前后不动，
+// 否则向上滚时画面会朝反方向跑。
+//
+// 推导（composite 里照片是 drawImage(源矩形 → 整张成品画布)）：
+//   成品画布上归一化位置 px 处的源点 = sx + px*sw
+//   要求缩放前后同一源点仍落在同一 px：sx + px*sw == sx' + px*sw'
+//   代入 sx = c.x + c.w/2 - sw/2 + offX*W（W=成品画布宽）化简得：
+//     offX' - offX = (sw - sw') * (px - 0.5) / W
+//   又 sw = W*paperFit/base（base = max(W/c.w, H/c.h)），代入即得下式。
+//   ⚠️ 这与「拖动」用的是同一个 offX，但两者符号看似相反、实则同源：
+//      拖动时 offX 增大 → 源矩形右移 → 画面上照片左移（所以拖动取负）；
+//      而锚点公式本身就是从几何约束推出来的，**必须保持正号**，改成负号会让锚点跑偏
+//      （自动化测试实测：离中心锚点色差 425，比整图变化还大）。
+prevWrap.addEventListener('wheel', (e) => {
+  if (!(edit.series === 'custom' && customPaperImg)) return;
+  e.preventDefault();
+  const k = Math.exp(-e.deltaY * .0016);
+  const next = Math.max(.2, Math.min(3, paperFit * k));
+  if (next === paperFit) return;
+  const c = edit.crop, cv = edPrev, W = cv.width, H = cv.height;
+  if (!c || !W || !H) { paperFit = next; syncPaperFitUI(); renderPreview(); return; }
+  const r = cv.getBoundingClientRect();
+  const px = (e.clientX - r.left) / Math.max(1, r.width);   // 光标在成品画布上的归一化位置 0~1
+  const py = (e.clientY - r.top) / Math.max(1, r.height);
+  const base = Math.max(W / c.w, H / c.h);
+  paperOffX += (paperFit - next) * (px - .5) / base;
+  paperOffY += (paperFit - next) * (py - .5) / base;
+  paperFit = next;
+  syncPaperFitUI(); renderPreview();
+}, { passive: false });
+$('edPaperCenter').onclick = () => { paperFit = 1; paperOffX = 0; paperOffY = 0; syncPaperFitUI(); renderPreview(); };
+// 换相纸/换配色后，若正处在背面创作，要把背面纸面重画一遍。
+// 旧代码只在 initBack 里更新纸色，而 initBack 只在「切到背面模式」时调用——
+// 于是用户先切背面、再换相纸，背面一直停留在旧纸色（实测六张镭射背面完全一样）。
+function refreshBackPaper() {
+  if (edit.mode !== 'back' || !edit.crop || !edit._backInit) return;
+  if (backInk.width !== backW || backInk.height !== backH) return;
+  paintPaper(bpc, backW, backH, currentPaper());
+}
 $('edCancel').onclick = closeEditor;
 // 原始素材图（未合成相框的），用于重新编辑时还原——否则会在成品上再叠一层相框
 function rawOriginal() {
@@ -1678,19 +2345,55 @@ function rawOriginal() {
   cv.getContext('2d').drawImage(edImg, 0, 0, cv.width, cv.height);
   return cv.toDataURL('image/jpeg', .9);
 }
+// 镭射流光的相位种子：由相纸 id 稳定派生，同一张纸每次打开颜色走向一致，不同纸彼此错开
+const seedOf = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) % 1000; return h / 1000; };
+// 当前相纸底色的相对亮度（0=纯黑 1=近白）。laserFoil 的渐变函数拿不到色标，
+// 所以用「相纸 id → 预置亮度表」的方式；非镭射/未知一律给 0.85（浅底）。
+const PAPER_LUM = { rainbow: .85, silver: .82, noir: .10, aurora: .48, sakura: .62, ocean: .45 };
+const paperBaseLum = () => PAPER_LUM[edit.paperId] ?? .85;
 $('edOk').onclick = async () => {
   if (!edit.pending || !edit.crop) return;
+  // 背面画布可能从未初始化过（用户没进背面模式就点完成），此时 backAspect 还是默认值，
+  // 着色器会按错比例采样背面 → 背面图案错位/变形。
+  // 注意不能用 backInk.width 判空：canvas 元素在 DOM 里，默认宽度就是 300（非零）。
+  // 要用 initBack 设的 _backInit 标志。
+  if (!edit._backInit && edit.crop) {
+    const bw = 1000, bh = Math.max(360, Math.round(bw * edit.crop.h / edit.crop.w));
+    backAspect = bw / bh;
+  }
   const out = composite(1400);
   const dataURL = out.toDataURL('image/jpeg', .88);
   const cfg = snapshotRestore();
+  // 相纸渲染参数：镭射纸要告诉 3D 渲染器「这张要随角度流光」，并附照片窗口位置（着色器避开照片区）
+  const wi = out.windowInsets || { l: 0, r: 0, t: 0, b: 0 };
+  const paper = {
+    holo: edit.series === 'laser' ? 1 : 0,
+    seed: seedOf(edit.paperId),
+    winL: wi.l, winR: wi.r, winT: wi.t, winB: wi.b,
+    // 背面贴图宽高比：背面画布是长方形而纹理数组是正方形，
+    // 着色器要按同一比例居中取样，否则背面图案会错位/变形。
+    aspect: backAspect || 1,
+    // 该纸底色的相对亮度（0=纯黑 1=近白）：着色器据此调制虹彩强度 ——
+    // 深底泛彩本就弱，浅底可以更明显。少了它玄黑背面会被满屏彩虹盖住。
+    baseLum: paperBaseLum(),
+  };
   const raw = rawOriginal();
-  // 背面：只有画过东西才生成（backCur>0 表示撤销栈里存在非初始状态）
-  edit.backURL = (backCur > 0 && backInk.width) ? compositeBack() : null;
+  // 背面：通常只有画过东西才生成（backCur>0 表示撤销栈里存在非初始状态）。
+  // 但镭射相纸例外：它正反两面都是整张铺满的箔面材质，背面若不生成贴图，
+  // 3D 里翻到背面就是一块空白（用户实测「背面不是同样的镭射相纸」）。
+  // 所以镭射纸无论画没画过都生成背面，让背面同样是完整箔面。
+  // 背面贴图什么时候要生成：
+  //  · 画过东西（backCur>0）—— 有手写内容
+  //  · 镭射纸 —— 正反两面都是整张铺满的箔面材质，背面不能是空白（用户实测「背面不是镭射相纸」）
+  // 用户没进过背面模式时 _backInit 仍为 false、墨层是空的，但相纸本身仍要画出来：
+  // compositeBack 只依赖 backInk 叠加以画纹理，空墨层叠上去不改变画面，所以可以安全生成。
+  const needBack = paper.holo || (edit._backInit && backCur > 0);
+  edit.backURL = needBack ? compositeBack() : null;
   const texts = backTexts.length ? backTexts.map((t) => ({ ...t })) : null;
   const { mode, sheet } = edit.pending;
   closeEditor();
-  if (mode === 'replace') await replacePhoto(sheet, dataURL, out.width, out.height, true, edit.backURL || null, { raw, cfg, texts });
-  else await addPhoto(dataURL, out.width, out.height, true, edit.backURL || null, { raw, cfg, texts });
+  if (mode === 'replace') await replacePhoto(sheet, dataURL, out.width, out.height, true, edit.backURL || null, { raw, cfg, texts, paper });
+  else await addPhoto(dataURL, out.width, out.height, true, edit.backURL || null, { raw, cfg, texts, paper });
 };
 addEventListener('resize', () => { if (!editor.hidden) renderCropBox(); });
 
@@ -1761,11 +2464,19 @@ function setMode(m) {
   $('edFrontLeft').hidden = back; $('edFrontRight').hidden = back;
   $('edBackLeft').hidden = !back; $('edBackRight').hidden = !back;
   document.querySelector('.ed-panel').classList.toggle('ed-full', back); // 背面模式整屏不滚动
-  if (back) { initBack(); requestAnimationFrame(fitView); maybeShowPanTip(); } else { closeTextPop(); }
+  if (back) {
+    // 图像尚未 onload 时 edit.crop 还是 null（快速双击照片后立刻点背面就会命中）。
+    // 旧代码此时 initBack 直接 return → 背面画布停在 300x150 的空白默认尺寸且无法恢复。
+    // 这里改为等图片就绪后再初始化，用户点哪儿都不会白屏。
+    if (edit.crop) initBack(); else if (!initBack.pending) { initBack.pending = true; edImg.addEventListener('load', () => { initBack.pending = false; if (edit.mode === 'back') initBack(); }, { once: true }); }
+    requestAnimationFrame(fitView); maybeShowPanTip();
+  } else closeTextPop();
 }
 function initBack() {
-  const c = edit.crop; if (!c) return;
+  const c = edit.crop;
+  if (!c) return false;   // 图片还没加载好；调用方（setMode）会挂 load 钩子重试
   backW = 1000; backH = Math.max(360, Math.round(backW * c.h / c.w));
+  backAspect = backW / backH;   // 供 loadBackLayer 居中 contain + 着色器采样对齐
   if (edit._backInit && backInk.width === backW && backInk.height === backH) { // 已有内容：只更新纸色
     paintPaper(bpc, backW, backH, currentPaper());
     return;
@@ -1803,10 +2514,6 @@ function initBack() {
       img.src = prev;
     }
   }
-}
-function refreshBackPaper() {
-  if (!backInk.width) return;
-  paintPaper(bpc, backW, backH, currentPaper());
 }
 // —— 撤销：画笔像素 + 文本对象一起快照 ——
 function snapshot() {
@@ -1865,6 +2572,9 @@ $('edPanTipClose').onclick = () => {
   requestAnimationFrame(fitView); // 画布区域变高了，重新适应窗口，避免纸面位置漂移
 };
 function maybeShowPanTip() { // 第一次进背面创作时提示一次（若本会话已读过则不再打扰）
+  // v109：手机上不自动弹 —— 引导条占位式参与文档流，窄屏下会吃掉 ~1/4 的画布高度
+  // （实测 390×844 里占 205px）。手机用户需要时点缩放条上的「？平移」随时能唤出。
+  if (innerWidth <= 720) return;
   let seen = false;
   try { seen = !!sessionStorage.getItem(PAN_TIP_KEY); } catch (e) {}
   if (!seen) $('edPanTip').hidden = false;
@@ -2417,15 +3127,30 @@ edRoot.addEventListener('selectstart', (e) => {
   if (edTextPopEl.contains(e.target)) return;
   e.preventDefault();
 });
+// 标题行 / 模式切换行：窄窗口下背面画布会紧贴它们（实测画布 top≈19px），
+// 手指落在这两行上时若不接管，浏览器会按「拖动页面」处理 → 橡皮筋回弹甚至整页重载，
+// 用户的编辑内容全部丢失（实测 test-touch 稳定复现）。这里直接吞掉，不让它落到画布。
+const ED_CHROME = '.ed-head, .ed-mode';
+// 任何「会触发 click 的交互控件」：落在它们身上的触摸必须放行——否则下面的
+// preventDefault 会掐掉浏览器合成的 click，按钮在手机/平板上「点了没反应」。
+const ED_NOCLICK = 'button, a, input, select, textarea, label, [role="button"]';
+// ⚠️ v108 触摸修复：早先对 .ed-head / .ed-mode 里的**所有** touchstart/touchmove 都
+// preventDefault（本意是窄屏下背面画布紧贴这两行时，别让手指拖动整页）。但代价是
+// 这两行里的按钮（完成 / 取消 / 正面 / 背面创作）的 click 被一并掐掉——
+// 用户实测「手机端/平板端完成按钮、背面编辑、取消等按钮无反应」正由此而来。
+// 修法：只对这两行的**空白区域**（非交互控件）预防默认；落在按钮上的触摸放行，
+// 让 click 正常合成。CSS 里 .ed-head/.ed-mode 已有 `touch-action:none` 兜底整页拖动。
 edRoot.addEventListener('touchstart', (e) => {
   if (edTextPopEl.contains(e.target)) return; // 文本框里的正常触摸放行
-  // 只在画布/舞台区域拦截；右侧工具栏按钮要保留点击
-  if (!backStage.contains(e.target)) return;
-  if (e.touches.length > 1) return;                      // 多指留给缩放/平移
-  e.preventDefault();                                    // 禁止系统长按接管
+  if (e.touches.length > 1) return;           // 多指留给缩放/平移
+  if (backStage.contains(e.target)) { e.preventDefault(); return; } // 禁止系统长按接管
+  // 仅空白区域吞掉拖动；按钮放行以保 click
+  if (e.target.closest && e.target.closest(ED_CHROME) && !e.target.closest(ED_NOCLICK)) e.preventDefault();
 }, { passive: false });
 edRoot.addEventListener('touchmove', (e) => {
-  if (backStage.contains(e.target)) e.preventDefault();  // 禁止画布区域滚动/橡皮筋
+  if (backStage.contains(e.target)) { e.preventDefault(); return; } // 禁止画布区域滚动/橡皮筋
+  // 仅空白区域禁止拖动页面；按钮上即便手指微抖也不取消 click
+  if (e.target.closest && e.target.closest(ED_CHROME) && !e.target.closest(ED_NOCLICK)) e.preventDefault();
 }, { passive: false });
 // 有些 iOS 版本把长按识别为 dragstart（拖拽图片），一并拦掉
 edRoot.addEventListener('dragstart', (e) => e.preventDefault());
@@ -2524,11 +3249,18 @@ $('edMode').addEventListener('click', (e) => {
   setMode(b.dataset.mode);
 });
 function compositeBack() {
+  // 背面画布未初始化时 backW/backH 是上一张的残留值，必须按当前裁剪框重算，
+  // 否则会合成出尺寸不对的背面图。
+  if (edit.crop) {
+    backW = 1000; backH = Math.max(360, Math.round(backW * edit.crop.h / edit.crop.w));
+  }
   const cv = document.createElement('canvas'); cv.width = backW; cv.height = backH;
   const c = cv.getContext('2d');
   paintPaper(c, backW, backH, currentPaper());
-  c.drawImage(backInk, 0, 0);
-  c.drawImage(backTextCv, 0, 0);
+  // 墨层只有初始化过且尺寸匹配时才叠上去：未初始化时它是 300×150 的空白默认画布，
+  // 直接 drawImage 会把相纸拉伸变形（叠空白等于没叠，所以判尺寸）。
+  if (edit._backInit && backInk.width === backW && backInk.height === backH) c.drawImage(backInk, 0, 0);
+  if (edit._backInit && backTextCv.width === backW && backTextCv.height === backH) c.drawImage(backTextCv, 0, 0);
   return cv.toDataURL('image/jpeg', .9);
 }
 buildSwatches(); // 背面色板（放在 BACK_COLORS 初始化之后）
@@ -2544,9 +3276,14 @@ async function replacePhoto(si, dataURL, width, height, fitted, backURL, extra) 
   p.src = dataURL; p.width = width; p.height = height; p.aspect = width / height; p.fitted = !!fitted; p.full = dataURL;
   p.description = '（你替换的照片）'; p.photographer = '你'; p.back = backURL || null;
   p.raw = raw; p.cfg = cfg; p.texts = extra?.texts || null;
+  if (extra?.paper) p.paper = extra.paper;         // 镭射流光/照片窗口：换了新设置就更新
+  if (fitted && p.paper) {                         // 纸片比例可能变了，重算并把相纸参数带进实例
+    const ns = makeSheet(pi, false);
+    for (const k of ['w', 'h', 'crop', 'paper']) { target[k] = ns[k]; writeSheet(target.buf, target); }
+  }
   await loadLayerImage(dataURL, target.layer);
   gl.activeTexture(gl.TEXTURE0); gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
-  if (backURL) { await loadBackLayer(backURL, target.layer); gl.activeTexture(gl.TEXTURE3); gl.generateMipmap(gl.TEXTURE_2D_ARRAY); gl.activeTexture(gl.TEXTURE0); }
+  if (backURL) { await loadBackLayer(backURL, target.layer, target.paper && target.paper.aspect); gl.activeTexture(gl.TEXTURE3); gl.generateMipmap(gl.TEXTURE_2D_ARRAY); gl.activeTexture(gl.TEXTURE0); }
   if (fitted) { // 删除该照片的特写纸片（若有），选中项若正好被删则选回整图
     for (let idx = sheets.length - 1; idx >= 0; idx--) if (sheets[idx].photo === pi && sheets[idx].study) { sheets.splice(idx, 1); dyn.splice(idx, 1); }
     sel = sheets.indexOf(selObj);
@@ -2590,11 +3327,20 @@ async function replacePhoto(si, dataURL, width, height, fitted, backURL, extra) 
 async function addPhoto(dataURL, width, height, fitted, backURL, extra) {
   if (photos.length >= MAX_LAYERS) { alert(`最多容纳 ${MAX_LAYERS} 张照片，请先“重置”或清理。`); return; }
   const pi = photos.length;
-  photos.push({ id: 'u' + Date.now(), src: dataURL, full: dataURL, description: '你添加的照片', photographer: '你', source_page: '', width, height, aspect: width / height, fitted: !!fitted, back: backURL || null, raw: extra?.raw || dataURL, cfg: extra?.cfg || null, texts: extra?.texts || null });
+  photos.push({ id: 'u' + Date.now(), src: dataURL, full: dataURL, description: '你添加的照片', photographer: '你', source_page: '', width, height, aspect: width / height, fitted: !!fitted, back: backURL || null, raw: extra?.raw || dataURL, cfg: extra?.cfg || null, texts: extra?.texts || null, paper: extra?.paper || null });
   await loadLayerImage(dataURL, pi);
   gl.activeTexture(gl.TEXTURE0); gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
-  if (backURL) { await loadBackLayer(backURL, pi); gl.activeTexture(gl.TEXTURE3); gl.generateMipmap(gl.TEXTURE_2D_ARRAY); gl.activeTexture(gl.TEXTURE0); }
-  const s = makeSheet(pi, false);
+  if (backURL) { await loadBackLayer(backURL, pi, extra?.paper?.aspect); gl.activeTexture(gl.TEXTURE3); gl.generateMipmap(gl.TEXTURE_2D_ARRAY); gl.activeTexture(gl.TEXTURE0); }
+  // 用户新添加照片的候选高度区间。房间高RH=5.4，纸片半高约 .4，
+  // 上限取 4.0 → 顶边约 4.4，离天花板还有 1.0 的余量，聚焦时不会"死贴天花板"。
+  // 下限 1.6 略高于示例照片的 1.55，避免新照片总沉在最底下一排。
+  const s = makeSheet(pi, false, [1.6, 4.0]);
+  //⚠️ 这里**不要**再写 `s.y = <某个常量>`。
+  //   早先硬编码 `s.y = 2.4`，于是每张新照片都挂在同一水平线——
+  //   用户实测反馈「每次新加的照片都是在同一高度，距离天花板的高度一致」。
+  //   当时的动机是"随机到 4.55 会让照片死贴天花板"，但那是把
+  //   「别贴天花板」误当成「钉死一个高度」来解决的，矫枉过正。
+  // 高度随机 + 优先空位，现由 makeSheet 的 30 次候选（挑最空的）一起完成。
   s.backOut = false; s.flipped = false; s.renderYaw = s.yaw; // 刚加的照片先正面朝外，方便立刻查看正面
   s.buf = sheets.length; sheets.push(s); writeSheet(s.buf, s);
   dyn.push({ ox: 0, oy: 0, oz: 0, ry: 0, vx: 0, vy: 0, vz: 0, vyaw: 0, was: false });
@@ -2608,7 +3354,8 @@ async function addPhoto(dataURL, width, height, fitted, backURL, extra) {
 // 照片是 base64 大图，localStorage 通常只有 5MB 几张就满；满了若不提示，刷新后用户会以为作品丢了
 // 用 var 声明：storeGet 可能在模块开头就被调用（早于本行的 let/const 初始化），
 // 用 let/const 会触发 TDZ（Cannot access before initialization）；var 提升保证可安全访问
-var DB_NAME = 'paper-cloud', STORE = 'kv', dbPromise = null;
+// ⚠️ v113：`var DB_NAME / STORE / dbPromise` 已上移到启动读取之前声明（见上），
+// 此处旧声明已移除——若保留，启动时会因TDZ/未赋值而拿到 undefined。
 function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((res, rej) => {
@@ -2621,57 +3368,171 @@ function openDB() {
   });
   return dbPromise;
 }
+// ⚠️ v113 起 **localStorage 兜底被彻底移除**，IndexedDB 是唯一真相来源。
+// 旧设计把整份 base64 照片同时镜像一份到 localStorage（仅 5MB），
+// 大图时它会**静默失败**并留下一份**旧的/更小的**副本；下次 storeGet 读到这份
+// 过期数据，于是「刚加的照片消失了」——用户实测反复丢稿的元凶。
+// 现在写入失败会明确抛出，由调用方弹提示，而不是悄悄用旧数据糊弄过去。
 async function storeSet(key, val) {
-  let ok = false;
-  try {
-    const db = await openDB();
-    await new Promise((res, rej) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(val, key);
-      tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
-    });
-    ok = true;
-  } catch (e) { console.warn('IndexedDB 写入失败，改用 localStorage', e); }
-  // 同步兜底一份（容量小也没关系：至少小作品能救回来）；超限不抛，避免打断保存流程
-  let lsOk = false;
-  try { localStorage.setItem(key, JSON.stringify(val)); lsOk = true; } catch (e) { /* 容量满，忽略 */ }
-  if (!ok && !lsOk) throw new Error('所有存储均写入失败');
-  return ok ? 'idb' : 'ls';
+  const db = await openDB();
+  await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(val, key);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+  });
+  return 'idb';
 }
+// 「本机存有作品」的极小标记（几十字节）。仅用于诊断/提示，不参与数据读取。
+function markHasWork() { try { localStorage.setItem('papercloud.hasWork', '1'); } catch (e) {} }
+
 async function storeGet(key) {
-  let fromIdb = null;
+  const db = await openDB();
+  return await new Promise((res, rej) => {
+    const rq = db.transaction(STORE, 'readonly').objectStore(STORE).get(key);
+    rq.onsuccess = () => res(rq.result ?? null); rq.onerror = () => rej(rq.error);
+  });
+}
+// 删除一个键。草稿删除用。
+async function storeDel(key) {
+  const db = await openDB();
+  await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).delete(key);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+// 存储自检：真写一条再读回来，判断 IndexedDB 到底能不能用。
+// 无痕模式、以 file:// 直接打开、隐私设置都会让它不可用——此时必须让用户知道，
+// 否则他会以为作品存好了，刷新后才发现全没了（用户实测踩过）。
+async function storageSelfCheck() {
   try {
-    const db = await openDB();
-    fromIdb = await new Promise((res, rej) => {
-      const rq = db.transaction(STORE, 'readonly').objectStore(STORE).get(key);
-      rq.onsuccess = () => res(rq.result ?? null); rq.onerror = () => rej(rq.error);
-    });
-  } catch (e) { console.warn('IndexedDB 读取失败，改读 localStorage', e); }
-  if (fromIdb && (fromIdb.added?.length || Object.keys(fromIdb.replaced || {}).length)) return fromIdb;
-  // IDB 没有或为空 → 读 localStorage 兜底
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      const v = JSON.parse(raw);
-      if (v && (v.added?.length || Object.keys(v.replaced || {}).length)) return v;
-    }
-  } catch (e) { console.warn('localStorage 数据损坏', e); }
-  return fromIdb;
+    const probe = '__probe__' + Date.now();
+    await storeSet(probe, { added: [1], replaced: {} });
+    const back = await storeGet(probe);
+    await storeDel(probe);
+    return !!(back && back.added && back.added.length);
+  } catch (e) { return false; }
 }
 let saving = false;
 function buildUserData() {
   const user = { replaced: {}, added: [] };
   photos.forEach((p) => {
     if (!p.src.startsWith('data:')) return;
-    const rec = { src: p.src, width: p.width, height: p.height, description: p.description, photographer: p.photographer, source_page: p.source_page, fitted: p.fitted, back: p.back || null, raw: p.raw || null, cfg: p.cfg || null, texts: p.texts || null };
+    const rec = { src: p.src, width: p.width, height: p.height, description: p.description, photographer: p.photographer, source_page: p.source_page, fitted: p.fitted, back: p.back || null, raw: p.raw || null, cfg: p.cfg || null, texts: p.texts || null, paper: p.paper || null };
     if (p.id.startsWith('u')) user.added.push({ id: p.id, ...rec });
     else user.replaced[p.id] = rec;
   });
   return user;
 }
+// ---------------------------------------------------------------------------
+// 草稿箱：多个带名字的快照 + 独立编辑会话
+// ---------------------------------------------------------------------------
+// 草稿快照与「当前作品」同格式（buildUserData 的 {replaced, added}），走同一个 IndexedDB。
+// 关键设计（用户选定「每个草稿独立编辑会话」）：
+//   · 进入会话时把**真实当前作品**原封不动暂存到 SESSION_KEY.origWork，
+//     再把草稿副本放进「实时槽」STORE_KEY —— boot 与 persist 因此完全不用改。
+//   · 存档点 draftKey(id) 只在点「保存回草稿」时写入，绝不会被误改。
+//   · 退出/刷新后可从 SESSION_KEY 恢复真实当前作品。
+const DRAFTS_KEY = 'papercloud.drafts';   // 草稿索引 [{id,name,savedAt,count,thumb}]
+const SESSION_KEY = 'papercloud.session'; // { draftId, name, origWork }
+function draftKey(id) { return 'papercloud.draft.' + id; }
+async function getDraftIndex() { try { return (await storeGet(DRAFTS_KEY)) || []; } catch (e) { return []; } }
+async function setDraftIndex(idx) { await storeSet(DRAFTS_KEY, idx); }
+async function loadDraftSnapshot(id) { try { return await storeGet(draftKey(id)); } catch (e) { return null; } }
+// 小封面缩略图（第一张用户照片压到 120px），草稿列表里一眼认出是哪份
+async function makeThumb(src) {
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+    const c = document.createElement('canvas'); c.width = 120; c.height = 120;
+    const g = c.getContext('2d');
+    const s = Math.min(img.width, img.height);
+    g.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 120, 120);
+    return c.toDataURL('image/jpeg', 0.7);
+  } catch (e) { return null; }
+}
+// 把当前画布存成一份新草稿
+async function saveCurrentAsDraft(name) {
+  const userData = buildUserData();
+  if (!userData.added.length && !Object.keys(userData.replaced).length) { toast('当前作品还是 6 张示例，先添加/替换照片再存草稿'); return null; }
+  const id = 'd' + Date.now() + Math.random().toString(36).slice(2, 6);
+  const firstUser = photos.find((p) => p.src && p.src.startsWith('data:'));
+  const thumb = firstUser ? await makeThumb(firstUser.src) : null;
+  const now = Date.now();
+  // ⚠️ 存草稿会把照片整份复制一份，占用与当前作品相当的空间。
+  // 手机浏览器 IndexedDB 配额有限，超限时 storeSet 会抛错——必须让失败「响亮」，
+  // 否则用户以为存好了，实际草稿是空的（早先版本异常被吞，是用户丢稿的真凶）。
+  try {
+    await storeSet(draftKey(id), { userData, name, savedAt: now });
+  } catch (e) {
+    console.warn('草稿写入失败', e);
+    toast('存草稿失败：浏览器存储空间已满。请先删除旧草稿或减少照片后重试', 6000);
+    return null;
+  }
+  const idx = await getDraftIndex();
+  idx.unshift({ id, name, savedAt: now, count: materializePhotos(userData).length, thumb });
+  await setDraftIndex(idx);
+  return id;
+}
+async function deleteDraft(id) {
+  await storeDel(draftKey(id));
+  const idx = (await getDraftIndex()).filter((x) => x.id !== id);
+  await setDraftIndex(idx);
+}
+// 进入草稿的独立编辑会话：暂存当前作品 → 草稿副本进实时槽 → 重建画布
+async function enterDraftSession(id) {
+  const snap = await loadDraftSnapshot(id);
+  if (!snap || !snap.userData) { toast('草稿已损坏或丢失'); return false; }
+  // ⚠️ 覆盖实时槽前的最后一道闸：绝不能用「空快照」把用户当前作品冲掉。
+  // 空草稿通常意味着当初存草稿时因配额超限写失败（照片没存进去），
+  // 真去换画布就等于当着用户的面删数据——宁可拒绝进入。
+  const snapHasPhotos = (snap.userData.added || []).length || Object.keys(snap.userData.replaced || {}).length;
+  if (!snapHasPhotos) { toast('这个草稿是空的（当初可能因存储空间不足没存成功），为避免覆盖你现在的作品，不能进入', 6000); return false; }
+  let s = await storeGet(SESSION_KEY);
+  if (!s) s = { draftId: id, name: snap.name, origWork: await storeGet(STORE_KEY) }; // 首次进入才暂存真实当前作品
+  else { s.draftId = id; s.name = snap.name; } // 会话中换草稿：保留最初暂存的当前作品
+  await storeSet(SESSION_KEY, s);
+  await storeSet(STORE_KEY, snap.userData); // 实时槽 = 草稿副本，persist() 照常写这里
+  location.reload();
+  return true;
+}
+// 「保存回草稿」：把当前编辑结果写回该草稿的存档点
+async function saveBackToDraft() {
+  const s = await storeGet(SESSION_KEY);
+  if (!s) return false;
+  const userData = buildUserData();
+  const now = Date.now();
+  await storeSet(draftKey(s.draftId), { userData, name: s.name, savedAt: now });
+  const idx = await getDraftIndex();
+  const e = idx.find((x) => x.id === s.draftId);
+  if (e) { e.savedAt = now; e.count = materializePhotos(userData).length; }
+  await setDraftIndex(idx);
+  toast(`已保存回草稿「${s.name}」`);
+  return true;
+}
+// 退出草稿会话：把暂存的真实当前作品放回实时槽
+async function exitDraftSession() {
+  const s = await storeGet(SESSION_KEY);
+  if (!s) { location.reload(); return; }
+  if (s.origWork) await storeSet(STORE_KEY, s.origWork); else await storeDel(STORE_KEY);
+  await storeDel(SESSION_KEY);
+  location.reload();
+}
+// 分享某个草稿：导出该草稿快照为只读 HTML（对方只能看不能改）
+async function shareDraft(id, btn) {
+  const snap = await loadDraftSnapshot(id);
+  if (!snap) { toast('草稿已损坏或丢失'); return; }
+  const dPhotos = materializePhotos(snap.userData);
+  const label = btn ? btn.textContent : '';
+  if (btn) btn.disabled = true;
+  try {
+    await buildReadOnlyHtml(dPhotos, snap.name, (m) => { if (btn) btn.textContent = m; });
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
 function persist() {
   const user = buildUserData();
   saving = true;
+  markHasWork();
   storeSet(STORE_KEY, user).then((where) => {
     saving = false;
     if (where === 'ls') toast('浏览器存储空间不足：本次作品刷新后可能无法保留，建议少放几张');
@@ -2682,9 +3543,14 @@ function persist() {
   });
 }
 // 刷新/关闭时若还在异步写入，同步补写一份，避免最后一张丢失
+// v113：localStorage 兜底移除后，这里不再需要 pagehide 同步补写
+// （原来补写的是 localStorage，现在IndexedDB 才是唯一真相来源；补写只会浪费空间并可能抛错）
+// 但**必须在换页时关闭数据库连接**：不关的话，刷新时旧连接仍开着，
+// 新页面的首次事务会读到过期快照（storeGet 里已加重试兜底，这里是第二道保险）。
 addEventListener('pagehide', () => {
-  if (!saving) return;
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(buildUserData())); } catch (e) { /* 容量满则忽略 */ }
+  const p = dbPromise;
+  dbPromise = null;
+  if (p) p.then((db) => { try { db.close(); } catch (e) {} }).catch(() => {});
 });
 // 轻提示（保存异常等重要信息才出现）
 let toastTimer = 0;
@@ -2797,7 +3663,67 @@ function askWorkName(okLabel = '确定') {
 }
 paintWorkName();
 
-async function exportReadOnly() {
+// 把任意照片列表打包成只读分享版 HTML 并触发下载。
+// photoList：完整照片数组（当前画布 photos，或草稿 materialize 出来的快照）。
+// workName：写进 <title> 与文件名。progress(m)：可选，用于把进度显示在按钮上。
+// 抽成独立函数是为了让「分享当前画布」与「分享某个草稿」复用同一套打包逻辑。
+async function buildReadOnlyHtml(photoList, workName, progress) {
+  const say = progress || (() => {});
+  // 1) 把每张照片的正面与背面转成 base64
+  const list = [];
+  for (let i = 0; i < photoList.length; i++) {
+    const p = photoList[i];
+    say(`导出中 ${i + 1}/${photoList.length}…`);
+    const src = await toDataURL(p.src);
+    const back = p.back ? await toDataURL(p.back) : null;
+    if (!src) continue;
+    list.push({
+      id: p.id, description: p.description, photographer: p.photographer,
+      source_page: p.source_page || '', width: p.width, height: p.height,
+      aspect: p.aspect, fitted: !!p.fitted, src, back: back || undefined,
+      // raw/cfg/texts 不带：分享版只读，背面已是成品图、不需要再进编辑器还原
+    });
+  }
+  say('打包资源…');
+  // 2) 取三份源码（fetch 读本文件，file:// 下同样可用）
+  const [htmlSrc, cssSrc, jsSrc] = await Promise.all([
+    fetch('index.html').then((r) => r.text()),
+    fetch('style.css').then((r) => r.text()),
+    fetch('main.js').then((r) => r.text()),
+  ]);
+  // 3) 内联 JS 前必须转义 "</script>"，否则 HTML 解析器会在这里提前截断脚本块
+  const jsSafe = jsSrc.replace(/<\/script/gi, '<\\/script');
+  const cssSafe = cssSrc.replace(/<\/style/gi, '<\\/style');
+  const payload = JSON.stringify({ readonly: true, name: workName, photos: list })
+    .replace(/</g, '\\u003c'); // 防 JSON 里的 < 破坏 script 块
+  // 4) 拼装：直接按 index.html 的固定结构替换。
+  //    替换用「函数形式」，避免 $& / $1 等替换模式与内容里的 $ 冲突。
+  //    先确认两个标签都存在（不存在说明页面结构变了，别硬拼）
+  //    宽松正则容忍缓存版本号（style.css?v=111）：v106 起引用带 ?v= 参数，
+  //    精确匹配会漏检 → 导出报「页面结构与预期不符」（2026-10-08 实测事故）
+  const CSS_TAG = /<link rel="stylesheet" href="style\.css[^"]*">/;
+  const JS_TAG = /<script type="module" src="main\.js[^"]*"><\/script>/;
+  if (!CSS_TAG.test(htmlSrc) || !JS_TAG.test(htmlSrc)) throw new Error('页面结构与预期不符（找不到 style.css 或 main.js 的引用标签）');
+  // 作品名写进 <title>，分享出去对方一眼看到是什么
+  const out = htmlSrc
+    .replace(/<title>[\s\S]*?<\/title>/, () => `<title>${workName.replace(/[<>&]/g, '')}</title>`)
+    .replace(CSS_TAG, () => `<style>\n${cssSafe}\n</style>`)
+    .replace(JS_TAG,
+      () => `<script>window.__PC_DATA__=${payload};</script>\n<script type="module">\n${jsSafe}\n</script>`);
+  const blob = new Blob([out], { type: 'text/html;charset=utf-8' });
+  const mb = (blob.size / 1024 / 1024).toFixed(1);
+  window.__lastExport = { html: out, size: blob.size, name: workName }; // 调试/验证出口：便于自动化测试取文件
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  // 文件名用作品名；去掉 Windows/文件系统不允许的字符
+  const safe = workName.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || DEFAULT_WORK_NAME;
+  a.download = safe + '（只读分享版）.html';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast(`已导出「${workName}」${mb} MB · 双击即可离线打开，只能浏览不能编辑`, 6000);
+}
+// 「导出分享版」入口：命名 → 打包**当前画布**
+async function exportCurrent() {
   const btn = $('exportBtn');
   const LABEL = '⬇ 导出分享版';
   btn.disabled = true;
@@ -2808,66 +3734,16 @@ async function exportReadOnly() {
     const typed = await askWorkName('确定并导出');
     if (typed == null) { btn.textContent = LABEL; return; } // 取消：不导出
     const workName = setWorkName(typed);
-
-    // 1) 把每张照片的正面与背面转成 base64
-    const list = [];
-    for (let i = 0; i < photos.length; i++) {
-      const p = photos[i];
-      say(`导出中 ${i + 1}/${photos.length}…`);
-      const src = await toDataURL(p.src);
-      const back = p.back ? await toDataURL(p.back) : null;
-      if (!src) continue;
-      list.push({
-        id: p.id, description: p.description, photographer: p.photographer,
-        source_page: p.source_page || '', width: p.width, height: p.height,
-        aspect: p.aspect, fitted: !!p.fitted, src, back: back || undefined,
-        // raw/cfg/texts 不带：分享版只读，背面已是成品图、不需要再进编辑器还原
-      });
-    }
-    say('打包资源…');
-    // 2) 取三份源码（fetch 读本文件，file:// 下同样可用）
-    const [htmlSrc, cssSrc, jsSrc] = await Promise.all([
-      fetch('index.html').then((r) => r.text()),
-      fetch('style.css').then((r) => r.text()),
-      fetch('main.js').then((r) => r.text()),
-    ]);
-    // 3) 内联 JS 前必须转义 "</script>"，否则 HTML 解析器会在这里提前截断脚本块
-    const jsSafe = jsSrc.replace(/<\/script/gi, '<\\/script');
-    const cssSafe = cssSrc.replace(/<\/style/gi, '<\\/style');
-    const payload = JSON.stringify({ readonly: true, name: workName, photos: list })
-      .replace(/</g, '\\u003c'); // 防 JSON 里的 < 破坏 script 块
-    // 4) 拼装：直接按 index.html 的固定结构替换。
-    //    替换用「函数形式」，避免 $& / $1 等替换模式与内容里的 $ 冲突。
-    //    先确认两个标签都存在（不存在说明页面结构变了，别硬拼）
-    const hasCssTag = htmlSrc.includes('<link rel="stylesheet" href="style.css">');
-    const hasJsTag = /<script type="module" src="main\.js[^"]*"><\/script>/.test(htmlSrc);
-    if (!hasCssTag || !hasJsTag) throw new Error('页面结构与预期不符（找不到 style.css 或 main.js 的引用标签）');
-    // 作品名写进 <title>，分享出去对方一眼看到是什么
-    const out = htmlSrc
-      .replace(/<title>[\s\S]*?<\/title>/, () => `<title>${workName.replace(/[<>&]/g, '')}</title>`)
-      .replace('<link rel="stylesheet" href="style.css">', () => `<style>\n${cssSafe}\n</style>`)
-      .replace(/<script type="module" src="main\.js[^"]*"><\/script>/,
-        () => `<script>window.__PC_DATA__=${payload};</script>\n<script type="module">\n${jsSafe}\n</script>`);
-    const blob = new Blob([out], { type: 'text/html;charset=utf-8' });
-    const mb = (blob.size / 1024 / 1024).toFixed(1);
-    window.__lastExport = { html: out, size: blob.size, name: workName }; // 调试/验证出口：便于自动化测试取文件
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    // 文件名用作品名；去掉 Windows/文件系统不允许的字符
-    const safe = workName.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || DEFAULT_WORK_NAME;
-    a.download = safe + '（只读分享版）.html';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    toast(`已导出「${workName}」${mb} MB · 双击即可离线打开，只能浏览不能编辑`, 6000);
+    await buildReadOnlyHtml(photos, workName, say);
   } catch (e) {
     console.warn('导出失败', e);
     toast('导出失败：' + (e.message || e));
   } finally {
     btn.disabled = false;
-    btn.textContent = '⬇ 导出分享版';
+    btn.textContent = LABEL;
   }
 }
-$('exportBtn').onclick = exportReadOnly;
+$('exportBtn').onclick = exportCurrent;
 
 function mulberry32(a) {
   return () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
@@ -2877,7 +3753,7 @@ function mulberry32(a) {
 // 只读分享模式：隐藏所有写入入口，提示改为"只读"。浏览、聚焦、翻转看背面全部保留。
 // ---------------------------------------------------------------------------
 if (READONLY) {
-  for (const id of ['add', 'reset', 'replace', 'editBtn', 'exportBtn', 'editName', 'file', 'nameDlg']) { const el = $(id); if (el) el.remove(); }
+  for (const id of ['add', 'reset', 'replace', 'editBtn', 'exportBtn', 'editName', 'file', 'nameDlg', 'worksBtn', 'worksMenu', 'draftsBtn', 'draftsDlg', 'draftSave', 'draftList', 'draftsClose', 'draftStorage', 'storageWarn', 'storageWarnMsg', 'storageWarnClose', 'sessionBar', 'sessionSave', 'sessionExit', 'sessionName']) { const el = $(id); if (el) el.remove(); }
   const hint = $('hint');
   // 分享版标题用作者起的作品名；没起名就退回页面标题
   const name = (EMBEDDED.name || '').trim();
@@ -2889,11 +3765,153 @@ if (READONLY) {
 }
 
 // ---------------------------------------------------------------------------
+// 作品菜单 / 草稿箱 / 草稿会话 —— 全部是写入入口，只读分享版不提供（元素已在上方移除）
+// ---------------------------------------------------------------------------
+if (!READONLY) {
+  // 存储自检：不可用时立刻明确告知，避免"以为存好了、刷新才发现全没了"
+  storageSelfCheck().then((ok) => {
+    if (ok) return;
+    const warn = $('storageWarn');
+    const msg = $('storageWarnMsg');
+    const isFile = location.protocol === 'file:';
+    if (msg) msg.textContent = isFile
+      ? '你正在以「本地文件」方式打开页面（file://），浏览器会禁用数据存储，照片刷新即丢。请改用公网 https 链接打开。'
+      : '你添加的照片在刷新或关闭页面后会丢失。请确认不是无痕/InPrivate 窗口，并允许本站使用存储。';
+    if (warn) warn.hidden = false;
+  });
+  $('storageWarnClose').onclick = () => { $('storageWarn').hidden = true; };
+
+  const worksBtn = $('worksBtn'), worksMenu = $('worksMenu');
+  const closeMenu = () => { worksMenu.hidden = true; worksBtn.setAttribute('aria-expanded', 'false'); };
+  worksBtn.onclick = (e) => {
+    e.stopPropagation();
+    const open = worksMenu.hidden;
+    worksMenu.hidden = !open;
+    worksBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  document.addEventListener('click', (e) => { if (!worksMenu.hidden && !e.target.closest('.works-wrap')) closeMenu(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !worksMenu.hidden) closeMenu(); });
+  for (const b of worksMenu.querySelectorAll('button')) b.addEventListener('click', closeMenu); // 点了菜单项就收起
+
+  // —— 草稿会话状态条：刷新后若仍在会话中，恢复提示 ——
+  const sessionBar = $('sessionBar');
+  storeGet(SESSION_KEY).then((s) => {
+    if (s && s.draftId) {
+      $('sessionName').textContent = `正在编辑草稿「${s.name || ''}」`;
+      sessionBar.hidden = false;
+    }
+  }).catch(() => {});
+  $('sessionSave').onclick = async () => { $('sessionSave').disabled = true; try { await saveBackToDraft(); } finally { $('sessionSave').disabled = false; } };
+  $('sessionExit').onclick = async () => {
+    if (!confirm('退出草稿编辑，回到你原来的作品？\n未「保存回草稿」的改动会丢失。')) return;
+    await exitDraftSession();
+  };
+
+  // —— 草稿箱面板 ——
+  const draftsDlg = $('draftsDlg'), draftList = $('draftList');
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const fmtTime = (ts) => { const d = new Date(ts || 0); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+  async function renderDrafts() {
+    const idx = await getDraftIndex();
+    draftList.innerHTML = '';
+    if (!idx.length) { draftList.innerHTML = '<div class="draft-empty">还没有草稿。<br>编辑好作品后点上面「把当前作品存为草稿」。</div>'; return; }
+    for (const d of idx) {
+      const item = document.createElement('div'); item.className = 'draft-item';
+      if (d.thumb) { const im = document.createElement('img'); im.className = 'draft-thumb'; im.src = d.thumb; im.alt = ''; item.appendChild(im); }
+      const meta = document.createElement('div'); meta.className = 'draft-meta';
+      const nm = document.createElement('div'); nm.className = 'draft-name'; nm.textContent = d.name || '未命名';
+      const sub = document.createElement('div'); sub.className = 'draft-sub'; sub.textContent = `${d.count || 0} 张 · ${fmtTime(d.savedAt)}`;
+      meta.append(nm, sub); item.appendChild(meta);
+      const acts = document.createElement('div'); acts.className = 'draft-acts';
+      const bEdit = document.createElement('button'); bEdit.textContent = '继续编辑'; bEdit.title = '以独立会话打开这个草稿，不影响当前作品';
+      bEdit.onclick = async () => { bEdit.disabled = true; await enterDraftSession(d.id); };
+      const bShare = document.createElement('button'); bShare.textContent = '分享'; bShare.title = '导出这个草稿为只读 HTML';
+      bShare.onclick = () => shareDraft(d.id, bShare);
+      const bDel = document.createElement('button'); bDel.className = 'draft-del'; bDel.textContent = '删除'; bDel.title = '删除这个草稿';
+      bDel.onclick = async () => {
+        if (!confirm(`删除草稿「${d.name || '未命名'}」？此操作不可撤销。`)) return;
+        await deleteDraft(d.id); await renderDrafts(); toast('已删除草稿');
+      };
+      acts.append(bEdit, bShare, bDel); item.appendChild(acts);
+      draftList.appendChild(item);
+    }
+  }
+  $('draftsBtn').onclick = async () => { draftsDlg.hidden = false; await renderDrafts(); await renderStorageInfo(); };
+  $('draftsClose').onclick = () => { draftsDlg.hidden = true; };
+  $('draftSave').onclick = async () => {
+    const name = await askWorkName('存为草稿');
+    if (name == null) return;
+    let id = null;
+    try { id = await saveCurrentAsDraft(name); }
+    catch (e) { console.warn(e); toast('存草稿失败：' + (e.message || e), 6000); }
+    if (id) { toast(`已存草稿「${name}」`); await renderDrafts(); await renderStorageInfo(); }
+  };
+  draftsDlg.addEventListener('pointerdown', (e) => { if (e.target === draftsDlg) draftsDlg.hidden = true; });
+
+  // 存储占用：把「存不下」变成看得见的事实，而不是等丢稿才发现
+  const fmtMB = (b) => (b / 1048576).toFixed(1) + ' MB';
+  async function renderStorageInfo() {
+    const el = $('draftStorage');
+    if (!el) return;
+    try {
+      const est = await navigator.storage?.estimate?.();
+      if (!est || !est.quota) { el.textContent = ''; return; }
+      const used = est.usage || 0, quota = est.quota;
+      const pct = Math.min(100, Math.round((used / quota) * 100));
+      el.textContent = `本机已用 ${fmtMB(used)} / 可用约 ${fmtMB(quota)}（${pct}%）` + (pct >= 80 ? ' ⚠️ 空间紧张，建议删除旧草稿' : '');
+    } catch (e) { el.textContent = ''; }
+  }
+  renderStorageInfo();
+}
+// 供自动化测试观察草稿箱状态
+window.__drafts = { getDraftIndex, loadDraftSnapshot, enterDraftSession, saveBackToDraft, exitDraftSession, shareDraft, saveCurrentAsDraft, materializePhotos, buildReadOnlyHtml, storeGet, storeSet };
 glReady = true; // 实例缓冲已就绪（flipSheet 需要直接回写）
 live = true; // 一切就绪：可以跑帧了
-window.__pc = { sheets, photos, flipSheet, select }; // 调试/验证出口
+// 把某张照片的世界中心投影到屏幕像素坐标（供自动化测试精确点击，尤其远距离时）
+const sheetScreen = (i) => {
+  const s = sheets[i], D = dyn[i];
+  const c = [s.x + (D ? D.ox : 0), s.y + (D ? D.oy : 0), s.z + (D ? D.oz : 0)];
+  const r = [c[0] - view.eye[0], c[1] - view.eye[1], c[2] - view.eye[2]];
+  const rx = r[0] * view.x[0] + r[1] * view.x[1] + r[2] * view.x[2];
+  const ry = r[0] * view.y[0] + r[1] * view.y[1] + r[2] * view.y[2];
+  const rz = r[0] * view.z[0] + r[1] * view.z[1] + r[2] * view.z[2];
+  if (rz >= -1e-3) return null; // 在相机背后
+  const t = Math.tan(FOV / 2), aspect = view.aspect;
+  const nx = -rx / rz, ny = -ry / rz;
+  return [(nx / (t * aspect) + 1) * innerWidth / 2, (1 - ny / t) * innerHeight / 2];
+};
+window.__pc = { sheets, photos, flipSheet, select, getSel: () => sel, zoomedIn, sheetScreen }; // 调试/验证出口
 window.__dyn = dyn;
 window.__pick = pick;
+window.__photos = () => photos;
+// 实例缓冲槽位自检：写错槽位顺序不会报错、只会静默错乱（纸片被甩飞/镭射不显色），
+// 所以留一个只读出口给自动化测试逐槽核对。
+window.__sheetSlots = () => {
+  // 取**最后**一张带相纸数据的纸片：自动化测试会把新造的照片放在末尾，
+  // 取第一张会命中没有 paper 字段的示例照片（读到的都是默认值，测不出真实问题）。
+  let n = -1;
+  for (let i = sheets.length - 1; i >= 0; i--) if (sheets[i].paper && sheets[i].paper.holo) { n = i; break; }
+  if (n < 0) n = sheets.length - 1;
+  if (n < 0) return null;
+  const o = n * FLOATS_PER_SHEET, d = sheetData;
+  return {
+    n,
+    center: [d[o], d[o+1], d[o+2], d[o+3]],       // 0-3
+    sizePhase: [d[o+4], d[o+5], d[o+6], d[o+7]],  // 4-7
+    crop: [d[o+8], d[o+9], d[o+10], d[o+11]],     // 8-11
+    dyn: [d[o+12], d[o+13], d[o+14], d[o+15]],    // 12-15 必须是 0
+    holo: d[o+16], seed: d[o+17], winL: d[o+18], winR: d[o+19],  // 16-19
+    winT: d[o+20], winB: d[o+21], aspect: d[o+22],             // 20-22
+    wins: [d[o+18], d[o+19], d[o+20], d[o+21]],
+  };
+};
+window.__sheetPos = () => sheets.map((s) => ({ x: s.x, y: s.y, z: s.z, yaw: s.yaw }));
+window.__sheetList = () => sheets.map((s) => ({ w: s.w, h: s.h, photo: s.photo, study: s.study, crop: s.crop, backOut: s.backOut, renderYaw: s.renderYaw }));
+window.__sheetDataDump = () => { const o = sheets.length; return Array.from(sheetData.slice((o - 1) * FLOATS_PER_SHEET, o * FLOATS_PER_SHEET)); };
+window.__selIdx = () => sel;
+window.__camState = () => ({ x: +cam.x.toFixed(3), y: +cam.y.toFixed(3), z: +cam.z.toFixed(3), yaw: +cam.yaw.toFixed(3), dist: +cam.dist.toFixed(3), goalDist: +goal.dist.toFixed(3) });
+window.__flipSheet = flipSheet;   // 自动化测试用：把某张纸片翻到背面（验证背面流光）
+window.__instances = null;        // 下面回填：GPU 实例缓冲（测试用它 getBufferSubData 读回真实数据）
 window.__tap = () => lastTap;
 window.__pcBack = () => ({ texts: backTexts, view: bview, sel: selText, undo: backCur, hitText, hitHandle, hitRotate, inkPos, canvasW: backW, canvasH: backH, getDrag: () => backDrag, getTool: () => edit.tool, getFont: () => edit.font, ensureFont }); // 背面画布调试出口
 window.__pcDraw = { rngOf, drawMini, MINI_MIX, DOODLE_COLORS }; // 供构建脚本复用同一套涂鸦绘制（保证示例背面与编辑器风格一致）
@@ -2905,3 +3923,5 @@ if (parent !== window) {
   requestAnimationFrame(() => requestAnimationFrame(done));
   setTimeout(done, 200); // 作品在屏幕外时帧可能被挂起
 }
+// 调试出口：预热池状态（自动化测试用来确认「点色卡是否命中缓存」）
+window.__warmStats = () => ({ size: paperLayerWarm.size, keys: [...paperLayerWarm.keys()].slice(0, 8) });
