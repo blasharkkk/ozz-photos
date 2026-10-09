@@ -74,12 +74,17 @@ function check(cond, msg) {
   const editorClosed = await evalJs(`document.getElementById('editor').hidden`);
   check(editorClosed, '「完成」已提交、编辑器已关闭');
 
-  // —— 端到端导出：点导出按钮 → 命名弹窗确认 → 轮询 __lastExport ——
-  await evalJs(`document.getElementById('exportBtn').click()`);
+  // —— v116 端到端：独立导出按钮已移除，分享统一走「💾 保存 → 📁 我的作品 → 某作品 → 分享」——
+  await evalJs(`document.getElementById('saveBtn').click()`);
   await wait(400);
   const dlgShown = await evalJs(`!document.getElementById('nameDlg').hidden`);
-  check(dlgShown, '命名弹窗已弹出');
+  check(dlgShown, '「💾 保存」弹出命名弹窗');
   await evalJs(`(() => { const i = document.getElementById('nameInput'); i.value = '回归测试作品'; document.getElementById('nameOk').click(); })()`);
+  await wait(1200);
+  await evalJs(`document.getElementById('worksBtn').click()`);
+  await wait(400);
+  const draftShared = await evalJs(`(() => { const b = document.querySelector('.draft-item .draft-acts button:nth-child(2)'); if (!b) return false; window.__lastExport = null; b.click(); return true; })()`);
+  check(draftShared, '草稿箱中该作品的「分享」按钮存在并已点击');
   // 轮询导出结果（照片 base64 转换可能要几秒）
   let exp = null;
   for (let i = 0; i < 30; i++) {
@@ -87,8 +92,8 @@ function check(cond, msg) {
     exp = await evalJs(`(() => { const e = window.__lastExport; return e ? { size: e.size, name: e.name, htmlLen: e.html.length } : null; })()`);
     if (exp) break;
   }
-  check(!!exp, `导出成功、__lastExport 已生成（${exp ? (exp.size / 1024 / 1024).toFixed(1) + ' MB' : '超时未出现'}）`);
-  if (exp) check(exp.name === '回归测试作品', `作品名来自命名弹窗（实际「${exp.name}」）`);
+  check(!!exp, `分享成功、__lastExport 已生成（${exp ? (exp.size / 1024 / 1024).toFixed(1) + ' MB' : '超时未出现'}）`);
+  if (exp) check(exp.name === '回归测试作品', `作品名来自保存时的命名（实际「${exp.name}」）`);
 
   // —— 产物内容断言：在页面内部检查大字符串，只回传布尔（6.8MB 传回 Node 会丢输出）——
   const prodChecks = await evalJs(`(() => {

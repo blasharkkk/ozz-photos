@@ -834,6 +834,11 @@ function select(i) {
     Object.assign(goal, { x: s.x, y: s.y, z: s.z, yaw: cam.yaw + turn, pitch: .04, dist: Math.max(s.h / (1.1 * t), s.w / (1.2 * t * W / H)) });
     $('title').textContent = p.description;
     $('credit').textContent = p.photographer;
+    // v116：自己添加的照片不显示「你添加的照片 / 你」文字说明（没有信息量），
+    // 只留符号按钮；同时显示 🗑 删除按钮（仅自己添加的照片可删，示例照片不提供）
+    const isUser = p.id.startsWith('u');
+    $('capText').style.display = isUser ? 'none' : '';
+    $('delBtn').hidden = !isUser;
     $('flipBtn').hidden = !p.back;   // 无背面的照片不显示（触摸设备才可见）
     if (p.back) loadBackFull(i);
     const src = $('source');
@@ -3569,11 +3574,39 @@ function watchStorage() {
 }
 $('add').onclick = () => openPicker('add');
 $('replace').onclick = () => { if (sel >= 0) openPicker('replace', sel); };
+// ---------------------------------------------------------------------------
+// 删除照片（v116）：只允许删「你自己添加的照片」（id 以 u 开头）。
+// 示例照片不提供删除——想把场景清回初始请用顶栏「↺ 重置」。
+// 实现：把该照片的所有纸片从 sheets/dyn 里去掉 → 重排 buf 并整体重传实例缓冲
+// （与 replacePhoto 删特写纸片同一套既有模式），photos 同步删除后 persist()。
+// 纹理层的"空洞"不用担心：用户照片只会追加在 photos 末尾，删的永远靠后，
+// 新照片的 pi 会复用释放出来的层号。
+async function deletePhoto(si) {
+  const sh = sheets[si];
+  if (!sh || READONLY) return;
+  const pi = sh.photo, p = photos[pi];
+  if (!p || !p.id.startsWith('u')) { toast('示例照片不能删除；要清空场景请用顶栏「重置」'); return; }
+  if (!confirm(`删除这张照片？此操作不可撤销。`)) return;
+  const selObj = sel >= 0 ? sheets[sel] : null; // 选中项若不在删除范围，删完按新索引选回同一张
+  for (let idx = sheets.length - 1; idx >= 0; idx--) if (sheets[idx].photo === pi) { sheets.splice(idx, 1); dyn.splice(idx, 1); }
+  for (const s2 of sheets) if (s2.photo > pi) s2.photo--;
+  photos.splice(pi, 1);
+  sheets.forEach((s2, idx) => { s2.buf = idx; writeSheet(idx, s2); });
+  gl.bindBuffer(gl.ARRAY_BUFFER, instances);
+  gl.bufferData(gl.ARRAY_BUFFER, sheetData, gl.STATIC_DRAW); // 索引重排后整体重传（256×24 float，约 24KB，忽略不计）
+  sheetDrag = null;
+  sel = selObj ? sheets.indexOf(selObj) : -1;
+  select(sel); // sel=-1 → 退回全景；否则重新聚焦原选中的那张
+  persist();
+  toast('已删除照片');
+  wake();
+}
+$('delBtn').onclick = () => { if (sel >= 0) deletePhoto(sel); };
 // 触摸设备兜底入口（按钮仅在 pointer:coarse 时显示）：编辑 / 翻转
 $('editBtn').onclick = () => { if (sel >= 0) reeditPhoto(sel); };
 $('flipBtn').onclick = () => { if (sel >= 0) flipSheet(sel); };
 $('reset').onclick = async () => {
-  if (!confirm('确定要清除你添加/替换的照片，恢复到最初的 6 张示例吗？此操作不可撤销。')) return;
+  if (!confirm('重置会清空当前作品的所有改动（添加/替换的照片），恢复到最初的示例照片。确定吗？此操作不可撤销。')) return;
   try {
     const db = await openDB();
     await new Promise((res) => { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).delete(STORE_KEY); tx.oncomplete = res; tx.onerror = res; });
@@ -3722,28 +3755,8 @@ async function buildReadOnlyHtml(photoList, workName, progress) {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   toast(`已导出「${workName}」${mb} MB · 双击即可离线打开，只能浏览不能编辑`, 6000);
 }
-// 「导出分享版」入口：命名 → 打包**当前画布**
-async function exportCurrent() {
-  const btn = $('exportBtn');
-  const LABEL = '⬇ 导出分享版';
-  btn.disabled = true;
-  btn.textContent = '命名中…';
-  const say = (m) => { btn.textContent = m; };
-  try {
-    // 先问名字：这就是命名唯一的入口。取消 = 不导出，不留半成品
-    const typed = await askWorkName('确定并导出');
-    if (typed == null) { btn.textContent = LABEL; return; } // 取消：不导出
-    const workName = setWorkName(typed);
-    await buildReadOnlyHtml(photos, workName, say);
-  } catch (e) {
-    console.warn('导出失败', e);
-    toast('导出失败：' + (e.message || e));
-  } finally {
-    btn.disabled = false;
-    btn.textContent = LABEL;
-  }
-}
-$('exportBtn').onclick = exportCurrent;
+// 「导出分享版」独立入口已移除（v116）：分享统一走「📁 我的作品 → 某作品 → 分享」
+// （先存草稿再分享，v111 定下的流程）。打包逻辑 buildReadOnlyHtml 供 shareDraft 复用。
 
 function mulberry32(a) {
   return () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
@@ -3753,7 +3766,7 @@ function mulberry32(a) {
 // 只读分享模式：隐藏所有写入入口，提示改为"只读"。浏览、聚焦、翻转看背面全部保留。
 // ---------------------------------------------------------------------------
 if (READONLY) {
-  for (const id of ['add', 'reset', 'replace', 'editBtn', 'exportBtn', 'editName', 'file', 'nameDlg', 'worksBtn', 'worksMenu', 'draftsBtn', 'draftsDlg', 'draftSave', 'draftList', 'draftsClose', 'draftStorage', 'storageWarn', 'storageWarnMsg', 'storageWarnClose', 'sessionBar', 'sessionSave', 'sessionExit', 'sessionName']) { const el = $(id); if (el) el.remove(); }
+  for (const id of ['add', 'reset', 'saveBtn', 'replace', 'delBtn', 'editBtn', 'editName', 'file', 'nameDlg', 'worksBtn', 'draftsDlg', 'draftSave', 'draftList', 'draftsClose', 'draftStorage', 'storageWarn', 'storageWarnMsg', 'storageWarnClose', 'sessionBar', 'sessionSave', 'sessionExit', 'sessionName']) { const el = $(id); if (el) el.remove(); }
   const hint = $('hint');
   // 分享版标题用作者起的作品名；没起名就退回页面标题
   const name = (EMBEDDED.name || '').trim();
@@ -3781,17 +3794,18 @@ if (!READONLY) {
   });
   $('storageWarnClose').onclick = () => { $('storageWarn').hidden = true; };
 
-  const worksBtn = $('worksBtn'), worksMenu = $('worksMenu');
-  const closeMenu = () => { worksMenu.hidden = true; worksBtn.setAttribute('aria-expanded', 'false'); };
-  worksBtn.onclick = (e) => {
-    e.stopPropagation();
-    const open = worksMenu.hidden;
-    worksMenu.hidden = !open;
-    worksBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // —— 顶栏（v116）：四个符号按钮 ＋ / ↺ / 💾 / 📁，不再有下拉菜单 ——
+  // 💾 保存：命名 → 存入「我的作品」（与草稿箱里「＋ 把当前作品存为草稿」同一套逻辑）
+  $('saveBtn').onclick = async () => {
+    const name = await askWorkName('存入我的作品');
+    if (name == null) return;
+    let id = null;
+    try { id = await saveCurrentAsDraft(name); }
+    catch (e) { console.warn(e); toast('保存失败：' + (e.message || e), 6000); }
+    if (id) toast(`已保存「${name}」到我的作品`);
   };
-  document.addEventListener('click', (e) => { if (!worksMenu.hidden && !e.target.closest('.works-wrap')) closeMenu(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !worksMenu.hidden) closeMenu(); });
-  for (const b of worksMenu.querySelectorAll('button')) b.addEventListener('click', closeMenu); // 点了菜单项就收起
+  // 📁 我的作品：直接展开草稿箱（继续编辑 / 分享 / 删除）
+  $('worksBtn').onclick = async () => { draftsDlg.hidden = false; await renderDrafts(); await renderStorageInfo(); };
 
   // —— 草稿会话状态条：刷新后若仍在会话中，恢复提示 ——
   const sessionBar = $('sessionBar');
@@ -3836,7 +3850,6 @@ if (!READONLY) {
       draftList.appendChild(item);
     }
   }
-  $('draftsBtn').onclick = async () => { draftsDlg.hidden = false; await renderDrafts(); await renderStorageInfo(); };
   $('draftsClose').onclick = () => { draftsDlg.hidden = true; };
   $('draftSave').onclick = async () => {
     const name = await askWorkName('存为草稿');
@@ -3880,7 +3893,7 @@ const sheetScreen = (i) => {
   const nx = -rx / rz, ny = -ry / rz;
   return [(nx / (t * aspect) + 1) * innerWidth / 2, (1 - ny / t) * innerHeight / 2];
 };
-window.__pc = { sheets, photos, flipSheet, select, getSel: () => sel, zoomedIn, sheetScreen }; // 调试/验证出口
+window.__pc = { sheets, photos, flipSheet, select, getSel: () => sel, zoomedIn, sheetScreen, deletePhoto }; // 调试/验证出口
 window.__dyn = dyn;
 window.__pick = pick;
 window.__photos = () => photos;

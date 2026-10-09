@@ -7,7 +7,7 @@
   <meta name="description" content="照片印在棉纸上，悬成一片云，浮在破碎镜面之上；镜面把流动的光投到天花板。拖动环视，滚轮拉近，点照片飞入聚焦，方向键切换，Esc 退回。">
   <meta name="theme-color" content="#7c7a76">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='5' width='14' height='11' fill='%23e9e5dc'/%3E%3Crect x='14' y='14' width='14' height='11' fill='%23cfc9bd'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=115">
+  <link rel="stylesheet" href="style.css?v=116">
 </head>
 <body>
   <canvas id="scene" tabindex="0" aria-label="一片悬在破碎镜面上方的纸照片云。拖动环视，滚轮或双指拉近；远距点照片飞入聚焦，已放大居中的照片再点一下翻面看背面；左右方向键切换，Esc 退回全景。"></canvas>
@@ -20,18 +20,14 @@
     <button id="storageWarnClose" type="button" aria-label="关闭提示">×</button>
   </div>
 
-  <!-- 顶部工具栏：添加你自己的照片 / 作品菜单。作品名不再占顶栏，改为导出时才问。
-       「作品」菜单收拢导出分享版 / 我的草稿 / 重置，顶栏只留两个按钮，手机端不挤 -->
+  <!-- 顶部工具栏（v116）：全部符号按钮，悬停看 title 提示。
+       ＋添加 · ↺重置（清空当前作品，需确认） · 💾保存（存入「我的作品」，命名） · 📁我的作品（草稿箱：继续编辑/分享）
+       分享走「📁 → 某个作品 → 分享」（先存再分享，v111 定下的流程），不再有独立导出按钮 -->
   <div id="toolbar" class="toolbar">
-    <button id="add" type="button" title="添加一张你自己的照片到云里">＋ 添加照片</button>
-    <div class="works-wrap">
-      <button id="worksBtn" type="button" title="导出 / 草稿箱 / 重置" aria-haspopup="menu" aria-expanded="false">☰ 作品 ▾</button>
-      <div id="worksMenu" class="works-menu" role="menu" hidden>
-        <button id="exportBtn" type="button" role="menuitem" title="把当前作品打包成一个可离线打开、只能查看不能编辑的 HTML 文件">⬇ 导出分享版</button>
-        <button id="draftsBtn" type="button" role="menuitem" title="保存草稿、继续编辑、分享草稿">📁 我的草稿</button>
-        <button id="reset" type="button" role="menuitem" title="清除你自己上传/替换的照片，恢复示例">↺ 重置</button>
-      </div>
-    </div>
+    <button id="add" type="button" title="添加一张你自己的照片到云里">＋</button>
+    <button id="reset" type="button" title="重置：清空当前作品的所有改动，恢复示例照片（会再次确认，不可撤销）">↺</button>
+    <button id="saveBtn" type="button" title="保存：把当前作品存入「我的作品」，保存时命名">💾</button>
+    <button id="worksBtn" type="button" title="我的作品（草稿箱）：继续编辑或分享" aria-haspopup="dialog">📁</button>
   </div>
 
   <!-- 草稿会话状态条：正在编辑某个草稿时出现，提供「保存回草稿 / 退出」 -->
@@ -58,7 +54,7 @@
   <!-- 作品命名弹窗：导出分享版时才弹出，问一次即可 -->
   <div id="nameDlg" class="name-dlg" hidden>
     <div class="name-box" role="dialog" aria-modal="true" aria-label="给作品起个名字">
-      <p>给这份作品起个名字<small>会写进浏览器标签标题，也是导出文件的文件名</small></p>
+      <p>给这份作品起个名字<small>保存到「我的作品」用这个名字，之后分享导出的文件名也用它</small></p>
       <input id="nameInput" type="text" maxlength="40" placeholder="My Photos" autocomplete="off" spellcheck="false">
       <div class="name-act">
         <button id="nameCancel" type="button">取消</button>
@@ -67,13 +63,16 @@
     </div>
   </div>
 
-  <!-- 选中某张照片时的说明栏，附带“替换此照片”入口 -->
+  <!-- 选中某张照片时的操作栏（v116）：符号按钮，悬停看 title。
+       中间文字说明只对示例照片显示（自己添加的照片不占空间）；
+       ⟳替换 · 🗑删除（仅限自己添加的照片，出现时才显示） · ⇄翻面（触屏设备可见） -->
   <div id="caption" class="caption" hidden>
     <button id="prev" type="button" aria-label="上一张">‹</button>
-    <p role="status"><strong id="title"></strong><span id="credit"></span><a id="source" target="_blank" rel="noopener">来源 ↗</a></p>
-    <button id="replace" type="button" title="用你自己的图替换这张">替换此照片</button>
-    <button id="editBtn" type="button" title="重新编辑这张（电脑双击照片；触屏双击或长按）">编辑</button>
-    <button id="flipBtn" type="button" title="翻转查看照片背面（已居中的照片，再点一下也能翻面）" hidden>⇄ 背面</button>
+    <p id="capText" role="status"><strong id="title"></strong><span id="credit"></span><a id="source" target="_blank" rel="noopener">来源 ↗</a></p>
+    <button id="replace" type="button" title="替换此照片：用你自己的图换掉这张">⟳</button>
+    <button id="delBtn" type="button" title="删除这张照片（仅限你自己添加的照片，会再次确认，不可撤销）" hidden>🗑</button>
+    <button id="editBtn" type="button" title="重新编辑这张（电脑双击照片；触屏双击或长按）">✎</button>
+    <button id="flipBtn" type="button" title="翻转查看照片背面（已居中的照片，再点一下也能翻面）" hidden>⇄</button>
     <button id="next" type="button" aria-label="下一张">›</button>
     <button id="close" type="button" aria-label="退回全景">×</button>
   </div>
@@ -244,6 +243,6 @@
   <!-- DIY 相纸底图选择器（只收 JPG / PNG，由「＋ 导入相纸」触发） -->
   <input id="edPaperFile" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden>
 
-  <script type="module" src="main.js?v=115"></script>
+  <script type="module" src="main.js?v=116"></script>
 </body>
 </html>

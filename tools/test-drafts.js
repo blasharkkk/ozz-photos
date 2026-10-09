@@ -47,15 +47,14 @@ function check(cond, msg) {
     return r.result.value;
   };
 
-  // —— 菜单开合 ——
+  // —— v116：顶栏无菜单，「📁 我的作品」直接展开草稿箱 ——
+  const hasMenu = await evalJs(`!!document.getElementById('worksMenu')`);
+  check(!hasMenu, 'v116 顶栏已无下拉菜单（worksMenu 移除）');
   await evalJs(`document.getElementById('worksBtn').click()`);
-  await wait(200);
-  const menuOpen = await evalJs(`!document.getElementById('worksMenu').hidden`);
-  check(menuOpen, '「作品」菜单可展开');
-  await evalJs(`document.body.click()`);
-  await wait(200);
-  const menuClosed = await evalJs(`document.getElementById('worksMenu').hidden`);
-  check(menuClosed, '点击空白处菜单收起');
+  await wait(300);
+  const panelOpen = await evalJs(`!document.getElementById('draftsDlg').hidden`);
+  check(panelOpen, '「📁」直接打开草稿箱面板');
+  await evalJs(`document.getElementById('draftsClose').click()`); await wait(200);
 
   // —— 注入一张照片（当前作品）——
   const baseCount = await evalJs(`window.__photos().length`); // 基础示例照片数（不硬编码）
@@ -74,11 +73,10 @@ function check(cond, msg) {
   const curCount = await evalJs(`window.__photos().length`);
   check(curCount === baseCount + 1, `当前作品照片 = 基础 ${baseCount} + 注入 1（实测 ${curCount}）`);
 
-  // —— 存草稿（走 UI：作品菜单→我的草稿→存为草稿→命名）——
-  await evalJs(`document.getElementById('worksBtn').click()`); await wait(150);
-  await evalJs(`document.getElementById('draftsBtn').click()`); await wait(400);
-  const panelOpen = await evalJs(`!document.getElementById('draftsDlg').hidden`);
-  check(panelOpen, '草稿箱面板已打开');
+  // —— 存草稿（走 UI：草稿箱内「＋ 把当前作品存为草稿」→ 命名）——
+  await evalJs(`document.getElementById('worksBtn').click()`); await wait(300);
+  const panelOpen2 = await evalJs(`!document.getElementById('draftsDlg').hidden`);
+  check(panelOpen2, '草稿箱面板再次打开');
   const emptyState = await evalJs(`!!document.querySelector('#draftList .draft-empty')`);
   check(emptyState, '初始为空态提示');
   await evalJs(`document.getElementById('draftSave').click()`); await wait(400);
@@ -169,8 +167,7 @@ function check(cond, msg) {
   // —— 删除草稿 ——
   await nav();
   await evalJs(`window.confirm = () => true;`);
-  await evalJs(`document.getElementById('worksBtn').click()`); await wait(150);
-  await evalJs(`document.getElementById('draftsBtn').click()`); await wait(400);
+  await evalJs(`document.getElementById('worksBtn').click()`); await wait(300);
   await evalJs(`document.querySelector('.draft-item .draft-del').click()`); await wait(900);
   const idx2 = await evalJs(`window.__drafts.getDraftIndex().then(a => a.length)`);
   check(idx2 === 0, `删除后草稿为空（实测 ${idx2}）`);

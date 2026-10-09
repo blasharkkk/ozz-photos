@@ -303,7 +303,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     await new Promise((r) => setTimeout(r, 300));
     document.getElementById('edOk').click();
     await new Promise((r) => setTimeout(r, 2500));
-    const d = JSON.parse(localStorage.getItem('papercloud.v1') || '{}');
+    // v113 起 localStorage 镜像已移除，IndexedDB 是唯一真相：改走 storeGet 读
+    const d = (await window.__drafts.storeGet('papercloud.v1')) || {};
     const rec = (d.added || [])[(d.added || []).length - 1] || Object.values(d.replaced || {})[0];
     return { hasRec: !!rec, paper: rec ? rec.paper : null, cfgHol: rec && rec.cfg ? rec.cfg.holo : null };
   })()`);
