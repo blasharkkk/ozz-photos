@@ -88,8 +88,10 @@ body.has-caption .hint { bottom: max(70px, calc(env(safe-area-inset-bottom) + 70
 .caption a { color: inherit; text-underline-offset: 3px; }
 .caption button { flex: none; width: 32px; height: 32px; border: 0; border-radius: 50%; background: none; color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer; }
 .caption button:hover { background: #ffffff1a; }
-/* 🗑 删除：危险色悬停（只对用户自己添加的照片出现） */
+/* 删除：明确垃圾桶图标（SVG，跨平台一致，不会渲染成叉叉）+ 危险红，始终醒目，区别于右上角 × 退回全景 */
+.caption #delBtn { display: inline-flex; align-items: center; justify-content: center; color: #ff7a72; background: #ff5a5212; }
 .caption #delBtn:hover { background: #ff5a5233; color: #ff9a92; }
+.caption #delBtn svg { width: 18px; height: 18px; display: block; }
 /* 触屏兜底入口：dblclick 在触摸设备不可靠，「编辑」按钮只在触摸设备出现（桌面端隐藏） */
 #editBtn, #flipBtn { display: none; }
 @media (pointer: coarse) {

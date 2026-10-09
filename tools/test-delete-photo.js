@@ -1,8 +1,7 @@
-// v116 回归：删除照片功能 + 聚焦栏符号化
-// 背景：用户新增「删除照片」——聚焦自己添加的照片时，底栏出现 🗑 删除（带确认）；
-//       说明文字「你添加的照片 / 你」对用户照片隐藏；示例照片不提供删除（用顶栏 ↺ 重置）。
-// 本测试端到端：注入照片 → 聚焦 → 断言删除按钮与文案可见性 → 点删除（确认） →
-//       照片数回落、持久层同步（刷新后仍是删除状态）。
+// v116~ 回归：删除照片功能 + 聚焦栏符号化
+// 背景：用户新增「删除照片」——聚焦时底栏出现垃圾桶图标删除（带确认）；
+//       说明文字「你添加的照片 / 你」对用户照片隐藏；示例照片现在也可删除（v116 后放开）。
+// 本测试端到端：注入照片 → 聚焦用户照片删除 → 刷新持久化 → 聚焦示例照片删除 → 刷新持久化。
 const { spawn } = require('child_process');
 const http = require('http');
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -57,14 +56,14 @@ function check(cond, msg) {
     return { capHidden: cap.hidden, delHidden: del.hidden, txtDisplay: getComputedStyle(txt).display, title: document.getElementById('title').textContent };
   })()`);
   check(!capUser.capHidden, '聚焦用户照片时说明栏可见');
-  check(!capUser.delHidden, '聚焦用户照片时 🗑 删除按钮可见');
+  check(!capUser.delHidden, '聚焦用户照片时垃圾桶删除按钮可见');
   check(capUser.txtDisplay === 'none', `用户照片不显示「你添加的照片」文字（display=${capUser.txtDisplay}）`);
 
   // —— 聚焦示例照片：删除按钮隐藏、文字说明显示 ——
   await ev(`window.__pc.select(0)`);
   await wait(400);
   const capEx = await ev(`(() => ({ delHidden: document.getElementById('delBtn').hidden, txtDisplay: getComputedStyle(document.getElementById('capText')).display }))()`);
-  check(capEx.delHidden, '示例照片不显示删除按钮（清空场景用顶栏 ↺ 重置）');
+  check(!capEx.delHidden, '示例照片现在也显示垃圾桶删除按钮');
   check(capEx.txtDisplay !== 'none', '示例照片保留标题/作者文字说明');
   await ev(`window.__pc.select(window.__pc.sheets.length - 1)`);
   await wait(400);
@@ -87,6 +86,27 @@ function check(cond, msg) {
   check(afterReload === base, `刷新后仍是 ${base} 张（删除已持久化，实测 ${afterReload}）`);
   const idbAdded = await ev(`(async()=>{const v=await window.__drafts.storeGet('papercloud.v1');return v&&v.added?v.added.length:-1;})()`);
   check(idbAdded === 0, `IndexedDB 中用户照片已清空（实测 ${idbAdded}）`);
+
+  // —— 示例照片也可删除（v116 后放开），且删除能持久化 ——
+  // ⚠️ 上面那次 nav() 会让 window.confirm 回到原生（headless 下会卡死），重设一次覆盖
+  await ev(`window.__confirmHits = 0; window.confirm = (...a) => { window.__confirmHits++; return true; };`);
+  await ev(`window.__pc.select(0)`);
+  await wait(400);
+  const capEx2 = await ev(`(() => ({ delHidden: document.getElementById('delBtn').hidden, txtDisplay: getComputedStyle(document.getElementById('capText')).display }))()`);
+  check(!capEx2.delHidden, '示例照片现在也显示垃圾桶删除按钮');
+  check(capEx2.txtDisplay !== 'none', '示例照片保留标题/作者文字说明');
+  const exId = await ev(`window.__photos()[0].id`);
+  await ev(`document.getElementById('delBtn').click()`);
+  await wait(1200);
+  const afterExDel = await ev(`window.__photos().length`);
+  check(afterExDel === base - 1, `删除一张示例后照片 = ${base} - 1（实测 ${afterExDel}）`);
+  const exDelCnt = await ev(`(async()=>{const v=await window.__drafts.storeGet('papercloud.v1');return v&&v.deleted?v.deleted.length:-1;})()`);
+  check(exDelCnt === 1, `IndexedDB 记录了 1 张已删示例（实测 ${exDelCnt}）`);
+  await nav();
+  const afterReload2 = await ev(`window.__photos() ? window.__photos().length : -1`);
+  check(afterReload2 === base - 1, `刷新后示例照片仍为 ${base - 1} 张（删除已持久化，实测 ${afterReload2}）`);
+  const exGone = await ev(`window.__photos().some(p=>p.id==='${exId}')`);
+  check(!exGone, `刷新后该示例 id 不再出现（${exId}）`);
 
   console.log(`\n结果：${pass} PASS / ${fail} FAIL`);
   ws.close(); chrome.kill();

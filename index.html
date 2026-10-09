@@ -7,7 +7,7 @@
   <meta name="description" content="照片印在棉纸上，悬成一片云，浮在破碎镜面之上；镜面把流动的光投到天花板。拖动环视，滚轮拉近，点照片飞入聚焦，方向键切换，Esc 退回。">
   <meta name="theme-color" content="#7c7a76">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='5' width='14' height='11' fill='%23e9e5dc'/%3E%3Crect x='14' y='14' width='14' height='11' fill='%23cfc9bd'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=116">
+  <link rel="stylesheet" href="style.css?v=117">
 </head>
 <body>
   <canvas id="scene" tabindex="0" aria-label="一片悬在破碎镜面上方的纸照片云。拖动环视，滚轮或双指拉近；远距点照片飞入聚焦，已放大居中的照片再点一下翻面看背面；左右方向键切换，Esc 退回全景。"></canvas>
@@ -65,12 +65,16 @@
 
   <!-- 选中某张照片时的操作栏（v116）：符号按钮，悬停看 title。
        中间文字说明只对示例照片显示（自己添加的照片不占空间）；
-       ⟳替换 · 🗑删除（仅限自己添加的照片，出现时才显示） · ⇄翻面（触屏设备可见） -->
+       ⟳替换 · 垃圾桶图标删除（仅限自己添加的照片，出现时才显示） · ⇄翻面（触屏设备可见） -->
   <div id="caption" class="caption" hidden>
     <button id="prev" type="button" aria-label="上一张">‹</button>
     <p id="capText" role="status"><strong id="title"></strong><span id="credit"></span><a id="source" target="_blank" rel="noopener">来源 ↗</a></p>
     <button id="replace" type="button" title="替换此照片：用你自己的图换掉这张">⟳</button>
-    <button id="delBtn" type="button" title="删除这张照片（仅限你自己添加的照片，会再次确认，不可撤销）" hidden>🗑</button>
+    <button id="delBtn" type="button" title="删除这张照片（仅限你自己添加的照片，会再次确认，不可撤销）" hidden>
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M6 6l1 14a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-14"/><path d="M10 11v6M14 11v6"/>
+      </svg>
+    </button>
     <button id="editBtn" type="button" title="重新编辑这张（电脑双击照片；触屏双击或长按）">✎</button>
     <button id="flipBtn" type="button" title="翻转查看照片背面（已居中的照片，再点一下也能翻面）" hidden>⇄</button>
     <button id="next" type="button" aria-label="下一张">›</button>
@@ -243,6 +247,6 @@
   <!-- DIY 相纸底图选择器（只收 JPG / PNG，由「＋ 导入相纸」触发） -->
   <input id="edPaperFile" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden>
 
-  <script type="module" src="main.js?v=116"></script>
+  <script type="module" src="main.js?v=117"></script>
 </body>
 </html>

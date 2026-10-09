@@ -335,7 +335,9 @@ let dbPromise = null;
 // 还原成完整照片数组。启动时喂当前作品，草稿分享/草稿会话喂草稿快照——同一套逻辑，
 // 避免"当前作品能渲染、草稿却渲染不出来"的两处不一致。
 function materializePhotos(userData) {
-  const arr = basePhotos.map((p) => ({ ...p }));
+  // 支持「删除示例照片」持久化：被用户删掉的示例（id 在 userData.deleted 里）跳过重建
+  const removed = (userData && userData.deleted) || [];
+  const arr = basePhotos.filter((b) => !removed.includes(b.id)).map((p) => ({ ...p }));
   if (userData) {
     for (const p of arr) if (userData.replaced?.[p.id]) { const r = userData.replaced[p.id]; p.src = r.src; p.width = r.width; p.height = r.height; p.aspect = r.width / r.height; p.fitted = r.fitted !== false; p.back = r.back || null; p.raw = r.raw || null; p.cfg = r.cfg || null; p.texts = r.texts || null; p.paper = r.paper || null; }
     for (const a of userData.added || []) arr.push({ ...a, aspect: a.width / a.height, fitted: a.fitted !== false, back: a.back || null });
@@ -838,7 +840,7 @@ function select(i) {
     // 只留符号按钮；同时显示 🗑 删除按钮（仅自己添加的照片可删，示例照片不提供）
     const isUser = p.id.startsWith('u');
     $('capText').style.display = isUser ? 'none' : '';
-    $('delBtn').hidden = !isUser;
+    $('delBtn').hidden = false; // v116+：用户照片与示例照片均可删除（删除前会再次确认）
     $('flipBtn').hidden = !p.back;   // 无背面的照片不显示（触摸设备才可见）
     if (p.back) loadBackFull(i);
     const src = $('source');
@@ -3419,13 +3421,15 @@ async function storageSelfCheck() {
 }
 let saving = false;
 function buildUserData() {
-  const user = { replaced: {}, added: [] };
+  const user = { replaced: {}, added: [], deleted: [] };
   photos.forEach((p) => {
     if (!p.src.startsWith('data:')) return;
     const rec = { src: p.src, width: p.width, height: p.height, description: p.description, photographer: p.photographer, source_page: p.source_page, fitted: p.fitted, back: p.back || null, raw: p.raw || null, cfg: p.cfg || null, texts: p.texts || null, paper: p.paper || null };
     if (p.id.startsWith('u')) user.added.push({ id: p.id, ...rec });
     else user.replaced[p.id] = rec;
   });
+  // 被删除的示例照片：其 base id 已不在当前 photos 里 → 记入 deleted，重载时跳过重建
+  for (const b of basePhotos) if (!photos.some((p) => p.id === b.id)) user.deleted.push(b.id);
   return user;
 }
 // ---------------------------------------------------------------------------
@@ -3457,7 +3461,7 @@ async function makeThumb(src) {
 // 把当前画布存成一份新草稿
 async function saveCurrentAsDraft(name) {
   const userData = buildUserData();
-  if (!userData.added.length && !Object.keys(userData.replaced).length) { toast('当前作品还是 6 张示例，先添加/替换照片再存草稿'); return null; }
+  if (!userData.added.length && !Object.keys(userData.replaced).length && !userData.deleted.length) { toast('当前作品还没有改动（还没添加/替换/删除照片），先改改再存草稿'); return null; }
   const id = 'd' + Date.now() + Math.random().toString(36).slice(2, 6);
   const firstUser = photos.find((p) => p.src && p.src.startsWith('data:'));
   const thumb = firstUser ? await makeThumb(firstUser.src) : null;
@@ -3575,8 +3579,9 @@ function watchStorage() {
 $('add').onclick = () => openPicker('add');
 $('replace').onclick = () => { if (sel >= 0) openPicker('replace', sel); };
 // ---------------------------------------------------------------------------
-// 删除照片（v116）：只允许删「你自己添加的照片」（id 以 u 开头）。
-// 示例照片不提供删除——想把场景清回初始请用顶栏「↺ 重置」。
+// 删除照片（v116+）：用户照片与示例照片均可删除（删除前会再次确认，不可撤销）。
+// 示例照片被删后：buildUserData 会把它记入 userData.deleted，重载时 materializePhotos
+// 跳过该 base id，从而「删除示例」也能持久化；想恢复全部示例用顶栏「↺ 重置」。
 // 实现：把该照片的所有纸片从 sheets/dyn 里去掉 → 重排 buf 并整体重传实例缓冲
 // （与 replacePhoto 删特写纸片同一套既有模式），photos 同步删除后 persist()。
 // 纹理层的"空洞"不用担心：用户照片只会追加在 photos 末尾，删的永远靠后，
@@ -3585,8 +3590,9 @@ async function deletePhoto(si) {
   const sh = sheets[si];
   if (!sh || READONLY) return;
   const pi = sh.photo, p = photos[pi];
-  if (!p || !p.id.startsWith('u')) { toast('示例照片不能删除；要清空场景请用顶栏「重置」'); return; }
-  if (!confirm(`删除这张照片？此操作不可撤销。`)) return;
+  if (!p) return;
+  const label = p.id.startsWith('u') ? '这张照片' : '这张示例照片';
+  if (!confirm(`删除${label}？此操作不可撤销。`)) return;
   const selObj = sel >= 0 ? sheets[sel] : null; // 选中项若不在删除范围，删完按新索引选回同一张
   for (let idx = sheets.length - 1; idx >= 0; idx--) if (sheets[idx].photo === pi) { sheets.splice(idx, 1); dyn.splice(idx, 1); }
   for (const s2 of sheets) if (s2.photo > pi) s2.photo--;
